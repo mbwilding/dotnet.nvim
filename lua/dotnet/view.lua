@@ -235,28 +235,6 @@ end
 -- Picker helper (shared by gf and o/O)
 -- ---------------------------------------------------------------------------
 
----@param bufnr integer
----@param sln_dir string
----@param kind "project"|"item"
----@param title string
----@param on_pick fun(rel: string)
-local function open_file_picker(bufnr, sln_dir, kind, title, on_pick)
-    local glob = kind == "item"
-        and nil
-        or "*.{csproj,fsproj,vbproj,esproj,vcxproj,pyproj,dbproj,shproj}"
-
-    Snacks.picker.files({
-        cwd     = sln_dir,
-        glob    = glob,
-        title   = title,
-        confirm = function(picker, item)
-            picker:close()
-            if not item then return end
-            on_pick(item.file or item.text)
-        end,
-    })
-end
-
 -- ---------------------------------------------------------------------------
 -- Render
 -- ---------------------------------------------------------------------------
@@ -363,14 +341,20 @@ function M.parse_buffer(bufnr, original_flat)
         local name, depth = strip_prefix(line)
         if name == "" then goto continue end
 
+        -- Trailing / means solution folder (oil convention)
+        local is_new_folder = vim.endswith(name, "/")
+        if is_new_folder then name = name:sub(1, -2) end
+
         while #stack > 1 and stack[#stack].depth >= depth do
             table.remove(stack)
         end
         local parent = stack[#stack].node
 
-        -- Detect kind from icon bytes
+        -- Detect kind from icon bytes, but trailing / overrides to folder
         local line_kind
-        do
+        if is_new_folder then
+            line_kind = "folder"
+        else
             local i2 = 1
             while i2 <= #line and line:byte(i2) == 0x20 do i2 = i2 + 1 end
             local rest = line:sub(i2)
@@ -382,7 +366,8 @@ function M.parse_buffer(bufnr, original_flat)
         end
 
         -- Positional match (kind must agree — rename is fine, shift is not)
-        local orig_row = original_flat[idx]
+        -- New folder lines (trailing /) won't match any existing row, handled below
+        local orig_row = is_new_folder and nil or original_flat[idx]
         if orig_row and orig_row.kind ~= line_kind then orig_row = nil end
 
         -- Name+kind fallback for shifted/pasted lines
@@ -398,14 +383,12 @@ function M.parse_buffer(bufnr, original_flat)
         local node
         if orig_row then
             local entry = orig_row.node.entry
-            -- Only copy if name changed (path always preserved from entry)
             if name ~= entry.name then
                 entry = vim.deepcopy(entry)
                 entry.name = name
             end
             node = { entry = entry, children = {} }
         else
-            -- New entry — path is empty until user sets it via gf
             if line_kind == "folder" then
                 node = { entry = { name = name, path = name,
                     type_guid = "2150E333-8FDC-42A3-9474-1A3956D46DE8",
@@ -471,51 +454,27 @@ function M.setup_keymaps(bufnr)
             if not s or not s.flat then return end
             local lnum = vim.api.nvim_win_get_cursor(0)[1]
 
-            -- O on line 1 makes no sense (nothing above the solution root)
             if lnum == 1 and key == "O" then return end
 
-            local buf_insert  = key == "o" and lnum or lnum - 1
-            local flat_insert = key == "o" and lnum + 1 or lnum
+            local buf_insert = key == "o" and lnum or lnum - 1
 
-            -- Infer depth from the adjacent line; solution root → depth 1
+            -- Infer depth from adjacent line; solution root → depth 1
             local ref_idx = key == "o" and lnum + 1 or lnum - 1
             local ref_row = s.flat[ref_idx]
             local depth
             if lnum == 1 then
-                depth = 1  -- inserting directly under the solution root
+                depth = 1
             else
-                depth = ref_row and ref_row.depth or (s.flat[lnum] and s.flat[lnum].depth or 1)
+                depth = ref_row and ref_row.depth
+                    or (s.flat[lnum] and s.flat[lnum].depth or 1)
             end
 
-            local sln_dir = vim.fn.fnamemodify(s.sln_path, ":h")
-            open_file_picker(bufnr, sln_dir, "project", "Add project", function(rel)
-                local name    = rel:match("([^/\\]+)$") or rel
-                local ext     = rel:match("%.([^%.]+)$")
-                local is_item = not (ext and PROJECT_ICONS[ext:lower()])
-                local new_entry = {
-                    name             = name,
-                    path             = rel,
-                    type_guid        = nil,
-                    id               = nil,
-                    is_folder        = false,
-                    is_solution_item = is_item,
-                }
-                local icon     = entry_icon(new_entry)
-                local new_line = string.rep(INDENT, depth) .. icon .. name
-
-                vim.bo[bufnr].modifiable = true
-                vim.api.nvim_buf_set_lines(bufnr, buf_insert, buf_insert, false, { new_line })
-                vim.bo[bufnr].modified   = true
-                vim.bo[bufnr].modifiable = true
-
-                table.insert(s.flat, flat_insert, {
-                    node  = { entry = new_entry, children = {} },
-                    depth = depth,
-                    kind  = is_item and "item" or "project",
-                })
-                apply_decorations(bufnr, s.flat)
-                vim.api.nvim_win_set_cursor(0, { buf_insert + 1, 0 })
-            end)
+            local indent = string.rep(INDENT, depth)
+            vim.bo[bufnr].modifiable = true
+            vim.api.nvim_buf_set_lines(bufnr, buf_insert, buf_insert, false, { indent })
+            vim.bo[bufnr].modifiable = true
+            vim.api.nvim_win_set_cursor(0, { buf_insert + 1, #indent })
+            vim.cmd("startinsert!")
         end, opts)
     end
 
@@ -567,34 +526,63 @@ function M.setup_keymaps(bufnr)
         apply_decorations(bufnr, s.flat)
     end, opts)
 
-    -- gf: pick/update path for entry under cursor
+    -- gf: pick/update path for entry under cursor, pre-seeded with current name as query
     vim.keymap.set("n", "gf", function()
         local state = require("dotnet.state")
         local s = state.get(bufnr)
         if not s or not s.flat then return end
         local lnum = vim.api.nvim_win_get_cursor(0)[1]
         local row  = s.flat[lnum]
-        if not row or row.kind == "solution" or row.kind == "folder" then return end
 
+        -- Read name from the buffer line directly so new (unsaved) lines work too
+        local buf_line = vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or ""
+        local line_name = strip_prefix(buf_line)
+        -- strip trailing / (folder marker) just in case
+        line_name = line_name:gsub("/$", "")
+
+        if row and (row.kind == "solution" or row.kind == "folder") then return end
+        -- Allow gf on lines with no flat entry (newly typed lines)
+
+        local initial = (row and row.node.entry.path ~= "" and row.node.entry.path)
+            or line_name
+            or ""
         local sln_dir = vim.fn.fnamemodify(s.sln_path, ":h")
-        open_file_picker(bufnr, sln_dir, row.kind, "Path for " .. row.node.entry.name,
-            function(rel)
-                local e    = row.node.entry
-                e.path = rel
-                e.name = rel:match("([^/\\]+)$") or rel
+        local kind    = row and row.kind or "project"
+        local glob    = kind == "item"
+            and nil
+            or "*.{csproj,fsproj,vbproj,esproj,vcxproj,pyproj,dbproj,shproj}"
 
-                -- Rewrite buffer line with updated icon and name
-                local indent   = string.rep(INDENT, row.depth)
-                local icon     = entry_icon(e)
+        Snacks.picker.files({
+            cwd     = sln_dir,
+            glob    = glob,
+            title   = "Path for " .. (initial ~= "" and initial or "new entry"),
+            pattern = initial,
+            confirm = function(picker, item)
+                picker:close()
+                if not item then return end
+                local rel  = item.file or item.text
+                local name = rel:match("([^/\\]+)$") or rel
+                local icon = entry_icon({ path = rel, name = name, is_folder = false })
+                local indent = row and string.rep(INDENT, row.depth)
+                    or (buf_line:match("^(%s*)") or "")
+
                 vim.bo[bufnr].modifiable = true
                 vim.api.nvim_buf_set_lines(bufnr, lnum - 1, lnum, false,
-                    { indent .. icon .. e.name })
+                    { indent .. icon .. name })
                 vim.bo[bufnr].modified   = true
                 vim.bo[bufnr].modifiable = true
 
+                -- Update flat entry if it exists, otherwise decoration picks up on next render
+                if row then
+                    local e = row.node.entry
+                    e.path = rel
+                    e.name = name
+                end
+
                 local st = state.get(bufnr)
                 if st and st.flat then apply_decorations(bufnr, st.flat) end
-            end)
+            end,
+        })
     end, opts)
 
     vim.keymap.set("n", "q", "<CMD>bdelete<CR>", opts)
