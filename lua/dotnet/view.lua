@@ -470,15 +470,22 @@ function M.setup_keymaps(bufnr)
             local s = state.get(bufnr)
             if not s or not s.flat then return end
             local lnum = vim.api.nvim_win_get_cursor(0)[1]
-            if lnum == 1 then return end
 
-            -- Infer depth from the adjacent line
-            local ref_idx = key == "o" and lnum + 1 or lnum - 1
-            local ref_row = s.flat[ref_idx]
-            local depth   = ref_row and ref_row.depth or (s.flat[lnum] and s.flat[lnum].depth or 1)
+            -- O on line 1 makes no sense (nothing above the solution root)
+            if lnum == 1 and key == "O" then return end
 
             local buf_insert  = key == "o" and lnum or lnum - 1
             local flat_insert = key == "o" and lnum + 1 or lnum
+
+            -- Infer depth from the adjacent line; solution root → depth 1
+            local ref_idx = key == "o" and lnum + 1 or lnum - 1
+            local ref_row = s.flat[ref_idx]
+            local depth
+            if lnum == 1 then
+                depth = 1  -- inserting directly under the solution root
+            else
+                depth = ref_row and ref_row.depth or (s.flat[lnum] and s.flat[lnum].depth or 1)
+            end
 
             local sln_dir = vim.fn.fnamemodify(s.sln_path, ":h")
             open_file_picker(bufnr, sln_dir, "project", "Add project", function(rel)
