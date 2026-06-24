@@ -5,18 +5,21 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 ## Features
 
 - Automatically intercepts opening `.sln`, `.slnx`, and `.slnf` files
-- Renders the solution as a native foldable tree, respecting the solution folder structure
+- Renders the solution as a native foldable tree, respecting solution folder structure
+- Solution items (files pinned to solution folders) shown as dimmed leaves
 - Nerd Font icons per project type
-- Project paths shown as dimmed virtual text, keeping the buffer clean
-- Rename projects by editing their name inline, then `:w` to save
+- Project paths shown as dimmed virtual text
+- Move projects and folders by cutting and pasting lines at the desired indent level
+- Rename by editing the name inline
+- Fold-aware `dd` — deleting a folder line deletes its entire subtree
 - `<leader>ds` toggles the view from anywhere, auto-detecting the solution in cwd
 
 ## File Format Support
 
 | Format | Description |
 |--------|-------------|
-| `.sln` | Classic Visual Studio solution. Folders and nesting come from `GlobalSection(NestedProjects)`. |
-| `.slnx` | XML-based solution format (VS 2022 17.x+). Folders are native `<Folder>` elements. |
+| `.sln` | Classic Visual Studio solution. Folders from `GlobalSection(NestedProjects)`, solution items from `ProjectSection(SolutionItems)`. |
+| `.slnx` | XML-based format (VS 2022 17.x+). Folders are native `<Folder>` elements. |
 | `.slnf` | JSON solution filter. Flat list, no folder concept. |
 
 ## Icons
@@ -27,7 +30,8 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 | `󰬟` | F# (`.fsproj`) |
 | `󰈝` | Visual Basic (`.vbproj`) |
 | `󰌚` | JavaScript/ES (`.esproj`) |
-| `` | Solution folder |
+| `󰉋` | Solution folder |
+| `󰈙` | Solution item (file) |
 | `` | Generic / unknown |
 | `󰘐` | Solution header |
 
@@ -43,7 +47,8 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 
 | Key | Action |
 |-----|--------|
-| `<CR>` | Open the project file under the cursor, or toggle fold if on a folder |
+| `<CR>` | Open project/item under cursor, or toggle fold if on a folder |
+| `dd` | Delete line. On a folder, deletes the entire subtree. |
 | `za` | Toggle fold under cursor |
 | `zo` / `zc` | Open / close fold |
 | `zR` / `zM` | Expand all / collapse all |
@@ -54,31 +59,54 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 
 ## Tree View
 
-The solution is rendered as an indented tree that mirrors the structure defined in the solution file. Solution folders are collapsible using standard Neovim fold commands. The buffer opens fully expanded.
-
-Example:
+The solution renders as an indented tree matching Visual Studio Solution Explorer order (alphabetical within each level). Solution folders are foldable. Solution items appear as dimmed leaves under their folder.
 
 ```
-󰘐 MySolution.sln
-   Backend/
-    󰌛 Api
-    󰌛 Api.Tests
-   Frontend/
-    󰌚 WebApp
-   󰌛 Shared
+󰘐 capability-kit.sln
+  1. Getting Started
+    󰌛 Documentation
+    󰌛 LocalDev
+    󰈙 README.md
+  2. Configuration
+    󰈙 .editorconfig
+    󰈙 .gitignore
+  4. Support Libraries
+    󰌛 CapabilityKit.Api
+    󰌛 CapabilityKit.Contracts
+  5. Web Modules
+    󰌚 capability-kit
+    󰌚 capability-kit.config
+     Utilities
+      󰌛 FigmaIcons
 ```
 
-Folds are driven by `foldmethod=indent`, so all native fold commands work as expected.
+## Moving Projects
+
+Indentation is the tree structure. To move an entry:
+
+1. `dd` to cut the line (or fold + `dd` to cut a whole folder with its subtree)
+2. Move the cursor to the target location
+3. `p` to paste
+4. Adjust indent with `<<` / `>>` until the depth matches the desired parent
+5. `:w` to save
+
+To move a project into an empty folder, paste the line after the folder line and indent it one level deeper with `>>`.
+
+The new tree structure is derived entirely from indentation when saving — no special syntax required.
 
 ## Editing
 
-### Renaming a project or folder
+### Renaming
 
 Edit the name on its line. The path (shown as virtual text) is unaffected. Save with `:w`.
 
-### Adding or removing projects
+### Adding a project
 
-Not yet supported via the buffer. Use `:DotnetSolution` to reload after making changes with `dotnet sln` on the command line.
+Add a new line at the desired indent level. The icon is inferred from the file extension. Save with `:w`.
+
+### Removing
+
+Delete the line with `dd`. For folders, `dd` removes the folder and all its children.
 
 ## Commands
 
@@ -89,20 +117,29 @@ Not yet supported via the buffer. Use `:DotnetSolution` to reload after making c
 
 ## Highlight Groups
 
-All groups link to standard groups by default and respect the active colourscheme.
-
 | Group | Links to | Purpose |
 |-------|----------|---------|
 | `DotnetSolutionIcon` | `Function` | Project type icon |
 | `DotnetSolutionProject` | `Normal` | Project name |
 | `DotnetSolutionPath` | `Comment` | Virtual text path |
 | `DotnetSolutionFolder` | `Directory` | Solution folder name and icon |
+| `DotnetSolutionItem` | `Comment` | Solution item file |
 | `DotnetSolutionHeader` | `Title` | Solution name header |
-| `DotnetSolutionModified` | `DiagnosticWarn` | Modified indicator |
+| `DotnetSolutionMissing` | `DiagnosticError` fg + undercurl | Project or item whose file does not exist on disk |
+
+## Configuration
+
+```lua
+require("dotnet").setup({
+    -- Show the virtual-text path only on the cursor line. Default: true.
+    path_on_cursor_only = true,
+
+    -- Global keymap to toggle the solution view. Set to false to disable. Default: "<leader>ds".
+    keymap = "<leader>ds",
+})
+```
 
 ## Installation
-
-Install with your plugin manager of choice, for example with lazy.nvim:
 
 ```lua
 {
@@ -112,4 +149,4 @@ Install with your plugin manager of choice, for example with lazy.nvim:
 
 ## How It Works
 
-When a `.sln`, `.slnx`, or `.slnf` file is opened, a `BufReadCmd` autocmd intercepts the normal file read and populates the buffer with the parsed solution tree instead. The buffer type is set to `acwrite` so that `:w` routes through a `BufWriteCmd` autocmd, which serialises the view back to disk in the original format. Tree structure is never modified by editing the buffer, only names.
+When a `.sln`, `.slnx`, or `.slnf` file is opened, a `BufReadCmd` autocmd intercepts the normal file read and populates the buffer with the parsed solution tree. The buffer type is `acwrite` so `:w` routes through `BufWriteCmd`, which reads the indentation of every line to reconstruct the full tree structure, then serialises it back to disk in the original format.

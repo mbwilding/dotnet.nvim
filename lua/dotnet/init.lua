@@ -131,8 +131,8 @@ function M.save_buffer(bufnr)
         return
     end
 
-    -- Apply any name edits from the buffer into the tree (structure unchanged)
-    local new_root = view.parse_buffer(bufnr, s.root, s.flat)
+    -- Reconstruct full tree from indentation
+    local new_root = view.parse_buffer(bufnr, s.flat or {})
 
     local new_raw
     if s.fmt == "slnx" then
@@ -140,20 +140,24 @@ function M.save_buffer(bufnr)
     elseif s.fmt == "slnf" then
         new_raw = parser.serialize_slnf(s.raw, new_root)
     else
-        -- Collect all entries from the tree for the sln serialiser
+        -- Derive nesting from the reconstructed tree structure
+        local new_nesting = parser.nesting_from_tree(new_root)
+        -- Flatten tree to get ordered entry list for Project block serialisation
         local flat = parser.flatten_tree(new_root)
         local entries = {}
-        for _, item in ipairs(flat) do
-            table.insert(entries, item.node.entry)
+        for _, row in ipairs(flat) do
+            if not row.node.entry.is_solution_item then
+                table.insert(entries, row.node.entry)
+            end
         end
-        new_raw = parser.serialize_sln(s.raw, entries, s.nesting)
+        new_raw = parser.serialize_sln(s.raw, entries, new_nesting)
     end
 
     local lines = vim.split(new_raw, "\n", { plain = true })
     while #lines > 0 and lines[#lines] == "" do table.remove(lines) end
 
-    local write_ok, err = pcall(vim.fn.writefile, lines, s.sln_path)
-    if not write_ok then
+    local ok, err = pcall(vim.fn.writefile, lines, s.sln_path)
+    if not ok then
         vim.notify("[dotnet] Write failed: " .. tostring(err), vim.log.levels.ERROR)
         return
     end
@@ -163,12 +167,19 @@ function M.save_buffer(bufnr)
     vim.bo[bufnr].modified = false
     vim.notify("[dotnet] Saved " .. vim.fn.fnamemodify(s.sln_path, ":t"), vim.log.levels.INFO)
 
+    -- Re-render so flat/decorations stay in sync
     view.render(bufnr, s.sln_path, new_root)
 end
 
 -- ---------------------------------------------------------------------------
 -- Bootstrap
 -- ---------------------------------------------------------------------------
+
+--- Configure dotnet.nvim. Call this to override defaults.
+---@param opts? dotnet.Config
+function M.setup(opts)
+    require("dotnet.config").apply(opts)
+end
 
 local view = require("dotnet.view")
 view.setup_highlights()
@@ -204,6 +215,9 @@ end, {
     complete = "file",
 })
 
-vim.keymap.set("n", "<leader>ds", M.toggle, { desc = "Dotnet: toggle solution view" })
+local cfg = require("dotnet.config")
+if cfg.values.keymap then
+    vim.keymap.set("n", cfg.values.keymap, M.toggle, { desc = "Dotnet: toggle solution view" })
+end
 
 return M
