@@ -6,12 +6,14 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 
 - Automatically intercepts opening `.sln`, `.slnx`, and `.slnf` files
 - Renders the solution as a native foldable tree, respecting solution folder structure
-- Solution items (files pinned to solution folders) shown as dimmed leaves
-- Nerd Font icons per project type
-- Project paths shown as dimmed virtual text
+- Solution items (files pinned to solution folders) shown as moveable lines with editable paths
+- Icons per project type and file type via MiniIcons, nonicons, or nvim-web-devicons
+- Project and item paths shown inline after the name, editable in insert mode
+- Missing files highlighted with a red underline
 - Move projects and folders by cutting and pasting lines at the desired indent level
 - Rename by editing the name inline
 - Fold-aware `dd` — deleting a folder line deletes its entire subtree
+- Solution root line is not editable
 - `<leader>ds` toggles the view from anywhere, auto-detecting the solution in cwd
 
 ## File Format Support
@@ -21,19 +23,6 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 | `.sln` | Classic Visual Studio solution. Folders from `GlobalSection(NestedProjects)`, solution items from `ProjectSection(SolutionItems)`. |
 | `.slnx` | XML-based format (VS 2022 17.x+). Folders are native `<Folder>` elements. |
 | `.slnf` | JSON solution filter. Flat list, no folder concept. |
-
-## Icons
-
-| Icon | Type |
-|------|------|
-| `󰌛` | C# (`.csproj`) |
-| `󰬟` | F# (`.fsproj`) |
-| `󰈝` | Visual Basic (`.vbproj`) |
-| `󰌚` | JavaScript/ES (`.esproj`) |
-| `󰉋` | Solution folder |
-| `󰈙` | Solution item (file) |
-| `` | Generic / unknown |
-| `󰘐` | Solution header |
 
 ## Keymaps
 
@@ -47,7 +36,7 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 
 | Key | Action |
 |-----|--------|
-| `<CR>` | Open project/item under cursor, or toggle fold if on a folder |
+| `<CR>` | Open project/item under cursor, or toggle fold if on a folder or solution line |
 | `dd` | Delete line. On a folder, deletes the entire subtree. |
 | `za` | Toggle fold under cursor |
 | `zo` / `zc` | Open / close fold |
@@ -59,25 +48,16 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 
 ## Tree View
 
-The solution renders as an indented tree matching Visual Studio Solution Explorer order (alphabetical within each level). Solution folders are foldable. Solution items appear as dimmed leaves under their folder.
+The solution renders as an indented tree matching Visual Studio Solution Explorer order (alphabetical within each level). The solution name is the root node. Solution folders are foldable. Projects and solution items show their relative path inline after the name, separated by two spaces.
 
 ```
-󰘐 capability-kit.sln
+capability-kit
   1. Getting Started
-    󰌛 Documentation
-    󰌛 LocalDev
-    󰈙 README.md
-  2. Configuration
-    󰈙 .editorconfig
-    󰈙 .gitignore
+    Documentation  docs/Documentation.csproj
+    LocalDev  localdev/LocalDev.csproj
+    README.md  README.md
   4. Support Libraries
-    󰌛 CapabilityKit.Api
-    󰌛 CapabilityKit.Contracts
-  5. Web Modules
-    󰌚 capability-kit
-    󰌚 capability-kit.config
-     Utilities
-      󰌛 FigmaIcons
+    CapabilityKit.Api  supportlibs/CapabilityKit.Api/CapabilityKit.Api.csproj
 ```
 
 ## Moving Projects
@@ -124,16 +104,14 @@ Delete the line with `dd`. For folders, `dd` removes the folder and all its chil
 | `DotnetSolutionPath` | `Comment` | Virtual text path |
 | `DotnetSolutionFolder` | `Directory` | Solution folder name and icon |
 | `DotnetSolutionItem` | `Comment` | Solution item file |
-| `DotnetSolutionHeader` | `Title` | Solution name header |
-| `DotnetSolutionMissing` | `DiagnosticError` fg + undercurl | Project or item whose file does not exist on disk |
+| `DotnetSolutionHeader` | VS purple | Solution name |
+| `DotnetSolutionModified` | `DiagnosticWarn` | Modified indicator |
+| `DotnetSolutionMissing` | `DiagnosticError` fg + undercurl | File does not exist on disk |
 
 ## Configuration
 
 ```lua
 require("dotnet").setup({
-    -- Show the virtual-text path only on the cursor line. Default: true.
-    path_on_cursor_only = true,
-
     -- Global keymap to toggle the solution view. Set to false to disable. Default: "<leader>ds".
     keymap = "<leader>ds",
 })

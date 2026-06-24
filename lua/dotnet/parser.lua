@@ -2,15 +2,14 @@
 ---
 --- Entry shapes:
 ---   Project/folder: { name, path, type_guid, id, is_folder, solution_items? }
----   solution_items: string[] of relative file paths belonging to a solution folder
+---   solution_items: string[] of relative file paths (backslash) belonging to a folder
 ---
 --- Tree node: { entry, children }
 ---   Root is synthetic: { entry=nil, children={...} }
 ---
---- Line kinds rendered in the buffer:
----   "project"  – a real project (csproj, esproj, …)
----   "folder"   – a solution folder (foldable)
----   "item"     – a solution item file inside a folder (non-foldable leaf)
+--- Flat row: { node, depth, kind }
+---   kind = "solution" | "folder" | "project" | "item"
+---   "item" rows are solution items (files pinned to a solution folder)
 
 local M = {}
 
@@ -58,12 +57,12 @@ end
 local function fwd(p) return (p:gsub("\\", "/")) end
 local function back(p) return (p:gsub("/", "\\")) end
 
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- Tree building
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 ---@param entries table[]
----@param nesting table<string,string>  child_id -> parent_id (uppercase)
+---@param nesting table<string,string>
 ---@return table root_node
 function M.build_tree(entries, nesting)
     local nodes = {}
@@ -103,87 +102,89 @@ function M.build_tree(entries, nesting)
     return root
 end
 
---- Derive a nesting map from the current tree structure.
---- Used after parse_buffer to produce the new NestedProjects section.
+--- Derive nesting map + ordered list from tree structure.
 ---@param root table
----@return table<string,string>  child_id -> parent_id
+---@return table<string,string>, table[]
 function M.nesting_from_tree(root)
     local nesting = {}
+    local ordered = {}
     local function walk(node, parent_entry)
         if node.entry and node.entry.id and parent_entry and parent_entry.id then
-            nesting[node.entry.id:upper()] = parent_entry.id:upper()
+            local child_id  = node.entry.id:upper()
+            local parent_id = parent_entry.id:upper()
+            nesting[child_id] = parent_id
+            table.insert(ordered, { child = child_id, parent = parent_id })
         end
         for _, child in ipairs(node.children) do
             walk(child, node.entry)
         end
     end
     walk(root, nil)
-    return nesting
+    return nesting, ordered
 end
 
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- Flat list for rendering
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 --- Flatten a tree into an ordered list of render rows.
---- Row 1 is always a synthetic "solution" row for the solution file itself.
---- All real entries follow at depth+1.
+--- Row 1 is always a synthetic "solution" row.
+--- Solution items appear as "item" rows after their parent folder's project children.
 --- Each row: { node, depth, kind }
----   kind = "solution" | "folder" | "project" | "item"
 ---@param root table
----@param sln_path string  Absolute path to the solution file
+---@param sln_path string
 ---@return table[]
 function M.flatten_tree(root, sln_path)
     local result = {}
 
-    -- Synthetic solution root row — strip extension from display name
-    local sln_name = sln_path and (sln_path:match("([^/\\]+)$"):gsub("%.[^%.]+$", "")) or "solution"
+    local sln_name = sln_path
+        and (sln_path:match("([^/\\]+)$"):gsub("%.[^%.]+$", ""))
+        or "solution"
     table.insert(result, {
-        node  = { entry = { name = sln_name, path = sln_path or "", is_folder = false, is_solution = true }, children = root.children },
+        node  = {
+            entry    = { name = sln_name, path = sln_path or "", is_folder = false, is_solution = true },
+            children = root.children,
+        },
         depth = 0,
         kind  = "solution",
     })
 
     local function walk(node, depth)
-        if node.entry then
-            local kind
-            if node.entry.is_folder then
-                kind = "folder"
-            elseif node.entry.is_solution_item then
-                kind = "item"
-            else
-                kind = "project"
-            end
-            table.insert(result, { node = node, depth = depth, kind = kind })
-            for _, child in ipairs(node.children) do
-                walk(child, depth + 1)
-            end
-            if node.entry.is_folder and node.entry.solution_items then
-                for _, item_path in ipairs(node.entry.solution_items) do
-                    local p = (item_path:gsub("\\", "/"))
-                    table.insert(result, {
-                        node = {
-                            entry = {
-                                name             = p:match("([^/\\]+)$") or p,
-                                path             = p,
-                                is_solution_item = true,
-                                is_folder        = false,
-                            },
-                            children = {},
+        if not node.entry then
+            for _, child in ipairs(node.children) do walk(child, depth) end
+            return
+        end
+        if node.entry.is_solution_item then
+            table.insert(result, { node = node, depth = depth, kind = "item" })
+            return
+        end
+        local kind = node.entry.is_folder and "folder" or "project"
+        table.insert(result, { node = node, depth = depth, kind = kind })
+        -- Project children first (sorted alphabetically already)
+        for _, child in ipairs(node.children) do
+            walk(child, depth + 1)
+        end
+        -- Solution items after project children
+        if node.entry.is_folder and node.entry.solution_items then
+            for _, item_path in ipairs(node.entry.solution_items) do
+                local p = fwd(item_path)
+                table.insert(result, {
+                    node = {
+                        entry    = {
+                            name             = p:match("([^/\\]+)$") or p,
+                            path             = p,
+                            is_solution_item = true,
+                            is_folder        = false,
                         },
-                        depth = depth + 1,
-                        kind  = "item",
-                    })
-                end
-            end
-        else
-            for _, child in ipairs(node.children) do
-                walk(child, depth)
+                        children = {},
+                    },
+                    depth = depth + 1,
+                    kind  = "item",
+                })
             end
         end
     end
 
-    -- Walk root's children at depth 1 (under the solution row)
     for _, child in ipairs(root.children) do
         walk(child, 1)
     end
@@ -191,21 +192,21 @@ function M.flatten_tree(root, sln_path)
     return result
 end
 
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- .sln parser
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 ---@param text string
 ---@return table[] entries, table<string,string> nesting
 function M.parse_sln(text)
     local entries = {}
-
-    -- Parse line by line to capture ProjectSection(SolutionItems) per entry
     local in_block = false
     local in_solution_items = false
     local current = nil
 
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local parse_text = text:sub(1, 3) == "\xEF\xBB\xBF" and text:sub(4) or text
+
+    for line in (parse_text .. "\n"):gmatch("([^\n]*)\n") do
         if not in_block then
             local tg, name, path, id = line:match(
                 '^Project%("{([^}]+)}"%)'
@@ -214,11 +215,11 @@ function M.parse_sln(text)
             if tg then
                 local tgu = tg:upper()
                 current = {
-                    name = name,
-                    path = fwd(path),
-                    type_guid = tgu,
-                    id = id:upper(),
-                    is_folder = (tgu == FOLDER_GUID),
+                    name           = name,
+                    path           = fwd(path),
+                    type_guid      = tgu,
+                    id             = id:upper(),
+                    is_folder      = (tgu == FOLDER_GUID),
                     solution_items = nil,
                 }
                 in_block = true
@@ -226,19 +227,16 @@ function M.parse_sln(text)
         else
             if line:match("^%s*ProjectSection%(SolutionItems%)") then
                 in_solution_items = true
-                -- Only collect items for solution folders
                 if current.is_folder then
                     current.solution_items = current.solution_items or {}
                 end
             elseif line:match("^%s*EndProjectSection") then
                 in_solution_items = false
             elseif in_solution_items then
-                -- "key = value" — for SolutionItems both key and value are the same path
                 local item = line:match("^%s*(.-)%s*=")
                 item = item and vim.trim(item)
                 if item and item ~= "" and current.solution_items then
-                    -- fwd() returns (string, count) via gsub — take only the first return value
-                    local path = fwd(item)
+                    local path = (item:gsub("\\", "/"))
                     current.solution_items[#current.solution_items + 1] = path
                 end
             elseif line:match("^EndProject%s*$") then
@@ -251,7 +249,7 @@ function M.parse_sln(text)
     end
 
     local nesting = {}
-    local nested_block = text:match("GlobalSection%(NestedProjects%)[^\n]*\n(.-)EndGlobalSection")
+    local nested_block = parse_text:match("GlobalSection%(NestedProjects%)[^\n]*\n(.-)EndGlobalSection")
     if nested_block then
         for child, parent in nested_block:gmatch("{([A-Fa-f0-9%-]+)}%s*=%s*{([A-Fa-f0-9%-]+)}") do
             nesting[child:upper()] = parent:upper()
@@ -261,11 +259,12 @@ function M.parse_sln(text)
     return entries, nesting
 end
 
----@param text string Original .sln text
----@param entries table[] All entries from the reconstructed tree (flat walk)
----@param nesting table<string,string> Derived from tree by nesting_from_tree()
+---@param text string
+---@param entries table[]
+---@param nesting table<string,string>
+---@param nesting_ordered table[]
 ---@return string
-function M.serialize_sln(text, entries, nesting)
+function M.serialize_sln(text, entries, nesting, nesting_ordered)
     local by_id = {}
     for _, e in ipairs(entries) do
         if e.id then by_id[e.id:upper()] = e end
@@ -273,53 +272,97 @@ function M.serialize_sln(text, entries, nesting)
 
     local new_entries = {}
     for _, e in ipairs(entries) do
-        if not e.id and not e.is_solution_item then
-            table.insert(new_entries, e)
-        end
+        if not e.id then table.insert(new_entries, e) end
     end
 
-    -- Rebuild Project blocks, preserving ProjectSection content verbatim
+    -- Rebuild Project blocks line by line.
+    -- ProjectSection content (SolutionItems, ProjectDependencies) is preserved
+    -- verbatim for existing entries. For entries with updated solution_items,
+    -- the SolutionItems section is replaced.
     local result_lines = {}
     local in_block = false
     local in_project_section = false
     local skip_block = false
+    local current_id = nil
+    local current_is_solution_items = false
 
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local parse_text = text:sub(1, 3) == "\xEF\xBB\xBF" and text:sub(4) or text
+
+    for line in (parse_text .. "\n"):gmatch("([^\n]*)\n") do
         if not in_block then
-            local id = line:match('^Project%("{[^}]+}"%)[^{]*{([A-Fa-f0-9%-]+)}%s*$')
+            local id = line:match('^Project%("{[^}]+}"%)[^{]*{([A-Fa-f0-9%-]+)}"?%s*$')
             if id then
                 local p = by_id[id:upper()]
                 if p then
                     table.insert(result_lines, string.format(
                         'Project("{%s}") = "%s", "%s", "{%s}"',
-                        p.type_guid or FOLDER_GUID,
-                        p.name,
-                        back(p.path),
-                        p.id
+                        p.type_guid or FOLDER_GUID, p.name, back(p.path), p.id
                     ))
-                    skip_block = false
+                    skip_block  = false
+                    current_id  = id:upper()
                 else
-                    skip_block = true
+                    skip_block  = true
+                    current_id  = nil
                 end
                 in_block = true
             else
                 table.insert(result_lines, line)
             end
         else
-            if line:match("^%s*ProjectSection") then
-                in_project_section = true
+            if line:match("^%s*ProjectSection%(SolutionItems%)") then
+                in_project_section        = true
+                current_is_solution_items = true
+                if not skip_block then
+                    local p = current_id and by_id[current_id]
+                    if p and p.solution_items ~= nil then
+                        -- solution_items was explicitly set (updated or cleared)
+                        if #p.solution_items > 0 then
+                            -- Inject updated items, skip original lines
+                            table.insert(result_lines, line)
+                            for _, item_path in ipairs(p.solution_items) do
+                                local bp = back(item_path)
+                                table.insert(result_lines, string.format("\t\t%s = %s", bp, bp))
+                            end
+                        end
+                        -- if empty ({}): skip the whole section (don't emit header)
+                    else
+                        -- nil: preserve verbatim
+                        table.insert(result_lines, line)
+                    end
+                end
+            elseif line:match("^%s*ProjectSection") then
+                in_project_section        = true
+                current_is_solution_items = false
                 if not skip_block then table.insert(result_lines, line) end
             elseif line:match("^%s*EndProjectSection") then
-                in_project_section = false
-                if not skip_block then table.insert(result_lines, line) end
+                local p = current_id and by_id[current_id]
+                -- Suppress EndProjectSection if we're clearing the section (empty array)
+                local suppress = current_is_solution_items
+                    and p and p.solution_items ~= nil and #p.solution_items == 0
+                in_project_section        = false
+                current_is_solution_items = false
+                if not skip_block and not suppress then
+                    table.insert(result_lines, line)
+                end
             elseif in_project_section then
-                if not skip_block then table.insert(result_lines, line) end
+                if not skip_block then
+                    -- Skip original SolutionItems lines if we've injected updated ones
+                    -- or cleared the section
+                    local p = current_id and by_id[current_id]
+                    if current_is_solution_items and p and p.solution_items ~= nil then
+                        -- already handled above — skip original line
+                    else
+                        table.insert(result_lines, line)
+                    end
+                end
             elseif line:match("^EndProject%s*$") then
-                in_block = false
-                in_project_section = false
+                in_block                  = false
+                in_project_section        = false
+                current_is_solution_items = false
                 if not skip_block then
                     table.insert(result_lines, "EndProject")
                 end
+                current_id = nil
                 skip_block = false
             elseif not skip_block then
                 table.insert(result_lines, line)
@@ -327,14 +370,11 @@ function M.serialize_sln(text, entries, nesting)
         end
     end
 
-    -- Append new entries before the Global section
+    -- Append new entries before Global
     if #new_entries > 0 then
         local insert_at = nil
         for i, line in ipairs(result_lines) do
-            if line:match("^Global%s*$") then
-                insert_at = i
-                break
-            end
+            if line:match("^Global%s*$") then insert_at = i; break end
         end
         local new_blocks = {}
         for _, e in ipairs(new_entries) do
@@ -344,11 +384,25 @@ function M.serialize_sln(text, entries, nesting)
                 math.random(0xFFFF), math.random(0xFFFF),
                 math.random(0xFFFFFFFFFFFF)
             )
-            table.insert(new_blocks, string.format(
+            local block = string.format(
                 'Project("{%s}") = "%s", "%s", "{%s}"\nEndProject',
                 e.type_guid or "FAE04EC0-301F-11D3-BF4B-00C04F79EFBC",
                 e.name, back(e.path), guid
-            ))
+            )
+            -- If it's a folder with solution items, add ProjectSection
+            if e.is_folder and e.solution_items and #e.solution_items > 0 then
+                local item_lines = {}
+                for _, ip in ipairs(e.solution_items) do
+                    local bp = back(ip)
+                    table.insert(item_lines, string.format("\t\t%s = %s", bp, bp))
+                end
+                block = string.format(
+                    'Project("{%s}") = "%s", "%s", "{%s}"\n\tProjectSection(SolutionItems) = preProject\n%s\n\tEndProjectSection\nEndProject',
+                    e.type_guid or FOLDER_GUID, e.name, back(e.path), guid,
+                    table.concat(item_lines, "\n")
+                )
+            end
+            table.insert(new_blocks, block)
         end
         local new_lines = vim.split(table.concat(new_blocks, "\n"), "\n", { plain = true })
         if insert_at then
@@ -360,16 +414,20 @@ function M.serialize_sln(text, entries, nesting)
         end
     end
 
-    -- Rebuild NestedProjects from the derived nesting map
+    -- Rebuild NestedProjects in tree-walk order
     local nested_lines = {}
-    for child, parent in pairs(nesting) do
-        if by_id[child] and by_id[parent] then
-            table.insert(nested_lines, string.format("\t\t{%s} = {%s}", child, parent))
+    for _, pair in ipairs(nesting_ordered or {}) do
+        if by_id[pair.child] and by_id[pair.parent] then
+            table.insert(nested_lines, string.format("\t\t{%s} = {%s}", pair.child, pair.parent))
         end
     end
-    table.sort(nested_lines)
 
     local result = table.concat(result_lines, "\n")
+    -- Prepend BOM if original had it
+    if text:sub(1, 3) == "\xEF\xBB\xBF" then
+        result = "\xEF\xBB\xBF" .. result
+    end
+
     if #nested_lines > 0 then
         local new_section = "\tGlobalSection(NestedProjects) = preSolution\n"
             .. table.concat(nested_lines, "\n") .. "\n"
@@ -383,7 +441,6 @@ function M.serialize_sln(text, entries, nesting)
             result = result:gsub("(EndGlobal)", new_section .. "\n%1", 1)
         end
     elseif result:find("GlobalSection%(NestedProjects%)") then
-        -- All nesting removed — strip the section
         result = result:gsub(
             "\n\tGlobalSection%(NestedProjects%)[^\n]*\n.-\tEndGlobalSection",
             ""
@@ -393,9 +450,9 @@ function M.serialize_sln(text, entries, nesting)
     return result
 end
 
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- .slnx parser
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 local function xml_attr(tag, attr)
     return tag:match(attr .. '%s*=%s*"([^"]*)"')
@@ -405,9 +462,8 @@ end
 ---@param text string
 ---@return table root_node
 function M.parse_slnx(text)
-    local root = { entry = nil, children = {} }
+    local root  = { entry = nil, children = {} }
     local stack = { root }
-
     for token in text:gmatch("<([^>]+)>") do
         local trimmed = vim.trim(token)
         if trimmed:sub(1, 1) == "/" then
@@ -415,22 +471,21 @@ function M.parse_slnx(text)
             if tag == "Folder" then table.remove(stack) end
         elseif trimmed:sub(-1) == "/" then
             local inner = trimmed:sub(1, -2)
-            local tag = inner:match("^(%S+)")
+            local tag   = inner:match("^(%S+)")
             if tag == "Project" then
                 local path = xml_attr(inner, "Path")
                 if path then
                     local fp = fwd(path)
-                    local node = {
-                        entry = {
-                            name = xml_attr(inner, "DisplayName") or fp:match("([^/\\]+)%.[^%.]+$") or fp,
-                            path = fp,
+                    table.insert(stack[#stack].children, {
+                        entry    = {
+                            name      = xml_attr(inner, "DisplayName") or fp:match("([^/\\]+)%.[^%.]+$") or fp,
+                            path      = fp,
                             type_guid = nil,
-                            id = nil,
+                            id        = nil,
                             is_folder = false,
                         },
                         children = {},
-                    }
-                    table.insert(stack[#stack].children, node)
+                    })
                 end
             end
         else
@@ -438,13 +493,7 @@ function M.parse_slnx(text)
             if tag == "Folder" then
                 local name = xml_attr(trimmed, "Name") or "Folder"
                 local node = {
-                    entry = {
-                        name = name,
-                        path = name,
-                        type_guid = FOLDER_GUID,
-                        id = nil,
-                        is_folder = true,
-                    },
+                    entry    = { name = name, path = name, type_guid = FOLDER_GUID, id = nil, is_folder = true },
                     children = {},
                 }
                 table.insert(stack[#stack].children, node)
@@ -452,7 +501,6 @@ function M.parse_slnx(text)
             end
         end
     end
-
     return root
 end
 
@@ -469,7 +517,7 @@ function M.serialize_slnx(text, root)
                 for _, child in ipairs(node.children) do walk(child, depth + 1) end
                 table.insert(lines, indent .. "</Folder>")
             elseif not node.entry.is_solution_item then
-                local e = node.entry
+                local e       = node.entry
                 local display = (e.name ~= e.path:match("([^/\\]+)%.[^%.]+$"))
                     and string.format(' DisplayName="%s"', e.name) or ""
                 table.insert(lines, indent .. string.format('<Project Path="%s"%s />', e.path, display))
@@ -479,37 +527,29 @@ function M.serialize_slnx(text, root)
         end
     end
     walk(root, 1)
-
     return text:gsub(
         "(<Solution[^>]*>)(.-)(</%s*Solution>)",
         function(open, _, close)
             return open .. "\n" .. table.concat(lines, "\n") .. "\n" .. close
-        end,
-        1
+        end, 1
     )
 end
 
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- .slnf parser
--- --------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 ---@param text string
----@return string solution_path, table root_node
+---@return string, table
 function M.parse_slnf(text)
     local solution_path = text:match('"path"%s*:%s*"([^"]+)"')
-    local projects_raw = text:match('"projects"%s*:%s*%[(.-)%]')
-    local root = { entry = nil, children = {} }
+    local projects_raw  = text:match('"projects"%s*:%s*%[(.-)%]')
+    local root          = { entry = nil, children = {} }
     if projects_raw then
         for p in projects_raw:gmatch('"([^"]+)"') do
             local fp = fwd(p)
             table.insert(root.children, {
-                entry = {
-                    name = fp:match("([^/\\]+)%.[^%.]+$") or fp,
-                    path = fp,
-                    type_guid = nil,
-                    id = nil,
-                    is_folder = false,
-                },
+                entry    = { name = fp:match("([^/\\]+)%.[^%.]+$") or fp, path = fp, type_guid = nil, id = nil, is_folder = false },
                 children = {},
             })
         end

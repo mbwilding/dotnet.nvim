@@ -1,19 +1,31 @@
 --- Buffer rendering for the dotnet solution view.
 ---
---- One line per tree row, indented by depth * 2 spaces.
---- Folders fold via foldmethod=manual with explicit fold ranges set after render.
---- Solution items render as dimmed leaves; they cannot be folded.
+--- Line format:
+---   Solution/folder:  <indent><icon><name>
+---   Project/item:     <indent><icon><name>  <path>
 ---
---- Moving entries: cut lines with dd (fold-aware for folders), paste at the
---- desired indent level. parse_buffer reconstructs the full tree from
---- indentation on :w.
+--- flat[i].kind is authoritative for existing lines.
+--- New lines (pasted or typed) infer kind from path extension.
+--- foldmethod=manual with explicit fold ranges set after render.
 
 local M = {}
+
+local PROJECT_ICONS = {
+    csproj  = "󰌛 ",
+    fsproj  = "󰬟 ",
+    vbproj  = "󰈝 ",
+    esproj  = "\xEE\x98\x8C ",
+    vdproj  = "󰒓 ",
+    dbproj  = "󰆼 ",
+    pyproj  = "󰌠 ",
+    vcxproj = "󰙲 ",
+    shproj  = "󰚩 ",
+}
 
 local ICONS = {
     _folder   = "󰉋 ",
     _solution = "󰘐 ",
-    _item     = "󰈙 ",
+    _item     = "󰈔 ",
     _default  = "󰈙 ",
 }
 
@@ -28,38 +40,39 @@ local HL = {
     missing  = "DotnetSolutionMissing",
 }
 
-local NS = vim.api.nvim_create_namespace("dotnet_solution")
+local NS     = vim.api.nvim_create_namespace("dotnet_solution")
 local INDENT = "  "
+local SEP    = "  "  -- two-space separator between name and path
 
 -- ---------------------------------------------------------------------------
--- Icon provider (mirrors canola's priority: MiniIcons > nonicons+devicons > devicons)
+-- Icon provider
 -- ---------------------------------------------------------------------------
 
----@type fun(name: string): string, string  Returns icon, hl_group
+---@type fun(name: string): string, string
 local _icon_fn = nil
 
 local function get_icon_for_file(name)
     if not _icon_fn then
-        -- Try MiniIcons first
         local ok_mini, mini = pcall(require, "mini.icons")
         if ok_mini and _G.MiniIcons then
-            _icon_fn = function(n) return mini.get("file", n) end
+            _icon_fn = function(n)
+                local icon, hl = mini.get("file", n)
+                return icon .. " ", hl
+            end
         else
-            -- Try nonicons + optional devicons fallback
             local ok_non, nonicons = pcall(require, "nonicons")
             if ok_non and nonicons.get_icon then
                 local ok_dev, devicons = pcall(require, "nvim-web-devicons")
                 _icon_fn = function(n)
                     local icon, hl = nonicons.get_icon(n)
-                    if icon and icon ~= "" then return icon, hl or HL.icon end
+                    if icon and icon ~= "" then return icon .. " ", hl or HL.icon end
                     if ok_dev then
                         local di, dh = devicons.get_icon(n)
-                        if di and di ~= "" then return di, dh or HL.icon end
+                        if di and di ~= "" then return di .. " ", dh or HL.icon end
                     end
                     return ICONS._default, HL.icon
                 end
             else
-                -- devicons only
                 local ok_dev, devicons = pcall(require, "nvim-web-devicons")
                 if ok_dev then
                     _icon_fn = function(n)
@@ -79,31 +92,27 @@ end
 ---@param entry table
 ---@return string icon, string hl
 local function entry_icon(entry)
-    if entry.is_solution then return ICONS._solution, HL.header end
-    if entry.is_folder   then return ICONS._folder, HL.folder end
-    if entry.is_solution_item then
-        local icon, hl = get_icon_for_file(entry.name)
-        return icon, hl
+    if entry.is_solution      then return ICONS._solution, HL.header  end
+    if entry.is_folder        then return ICONS._folder,   HL.folder  end
+    if entry.is_solution_item then return ICONS._item,     HL.item    end
+    local ext = entry.path and entry.path:match("%.([^%.]+)$")
+    if ext and PROJECT_ICONS[ext:lower()] then
+        return PROJECT_ICONS[ext:lower()], HL.icon
     end
-    -- Real project: get icon from filename
-    local icon, hl = get_icon_for_file(entry.name)
-    return icon, hl
+    return get_icon_for_file(entry.name)
 end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
---- Strip leading indent spaces + multi-byte icon, return name and depth.
+--- Strip leading indent + icon, return name and depth.
 ---@param line string
 ---@return string name, integer depth
 local function strip_prefix(line)
     local spaces = 0
     local i = 1
-    while i <= #line and line:byte(i) == 0x20 do
-        spaces = spaces + 1
-        i = i + 1
-    end
+    while i <= #line and line:byte(i) == 0x20 do spaces = spaces + 1; i = i + 1 end
     local depth = math.floor(spaces / #INDENT)
     while i <= #line do
         local b = line:byte(i)
@@ -121,7 +130,7 @@ end
 ---@param rel_path string
 ---@return boolean
 local function file_exists(sln_path, rel_path)
-    if rel_path == "" then return false end
+    if not rel_path or rel_path == "" then return false end
     return vim.uv.fs_stat(vim.fn.fnamemodify(sln_path, ":h") .. "/" .. rel_path) ~= nil
 end
 
@@ -136,56 +145,60 @@ local function apply_decorations(bufnr, flat, cursor_lnum)
     vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
 
     local state = require("dotnet.state")
-    local cfg   = require("dotnet.config")
     local s = state.get(bufnr)
-    local path_on_cursor_only = cfg.values.path_on_cursor_only
-    local sln_path = s and s.sln_path or ""
+    local sln_path  = s and s.sln_path or ""
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
 
     for i, row in ipairs(flat) do
         local lnum = i - 1
-        local e = row.node.entry
+        if lnum >= line_count then break end
+
+        local e            = row.node.entry
         local indent_bytes = #INDENT * row.depth
         local icon, icon_hl = entry_icon(e)
+        local buf_line     = vim.api.nvim_buf_get_lines(bufnr, lnum, lnum + 1, false)[1]
+        local line_len     = #buf_line
 
+        -- Icon
         vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, indent_bytes, {
-            end_col  = indent_bytes + #icon,
+            end_col  = math.min(indent_bytes + #icon, line_len),
             hl_group = icon_hl,
             priority = 10,
         })
 
-        local name_col = indent_bytes + #icon
-        local is_missing = false
-        if not e.is_folder and not e.is_solution then
-            is_missing = not file_exists(sln_path, e.path)
-        end
+        local name_col  = indent_bytes + #icon
+        local is_missing = not e.is_folder and not e.is_solution
+            and not file_exists(sln_path, e.path)
 
+        -- Name
         local name_hl
-        if e.is_solution then
-            name_hl = HL.header
-        elseif is_missing then
-            name_hl = HL.missing
-        elseif e.is_solution_item then
-            name_hl = HL.item
-        elseif e.is_folder then
-            name_hl = HL.folder
-        else
-            name_hl = HL.name
+        if e.is_solution    then name_hl = HL.header
+        elseif is_missing   then name_hl = HL.missing
+        elseif e.is_folder  then name_hl = HL.folder
+        elseif e.is_solution_item then name_hl = HL.item
+        else                     name_hl = HL.name
         end
 
-        vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, name_col, {
-            end_col  = name_col + #e.name,
-            hl_group = name_hl,
-            priority = 10,
-        })
+        if name_col < line_len then
+            vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, name_col, {
+                end_col  = math.min(name_col + #e.name, line_len),
+                hl_group = name_hl,
+                hl_mode  = "replace",
+                priority = 20,
+            })
+        end
 
+        -- Path (inline, after SEP separator)
         if not e.is_folder and not e.is_solution then
-            local show_path = not path_on_cursor_only or (i == cursor_lnum)
-            if show_path then
-                local path_hl = is_missing and HL.missing or (e.is_solution_item and HL.item or HL.path)
-                vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, 0, {
-                    virt_text     = { { "  " .. e.path, path_hl } },
-                    virt_text_pos = "eol",
-                    priority      = 5,
+            local path_col = name_col + #e.name + #SEP
+            if path_col < line_len then
+                local path_hl = is_missing and HL.missing
+                    or (e.is_solution_item and HL.item or HL.path)
+                vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, path_col, {
+                    end_col  = line_len,
+                    hl_group = path_hl,
+                    hl_mode  = "replace",
+                    priority = 15,
                 })
             end
         end
@@ -193,26 +206,17 @@ local function apply_decorations(bufnr, flat, cursor_lnum)
 end
 
 -- ---------------------------------------------------------------------------
--- Folds
+-- Folds (manual)
 -- ---------------------------------------------------------------------------
 
---- Set manual folds for every folder node with children.
---- foldmethod=manual means these never recalculate spontaneously.
 ---@param bufnr integer
 ---@param flat table[]
 local function apply_folds(bufnr, flat)
-    -- Build a map: line number -> last line of its subtree
-    -- A folder at line L owns lines L+1 .. L+N where N = all descendants
     local total = #flat
-
-    -- For each folder line, find the last line that belongs to it
-    -- (i.e. the last line whose depth > folder depth, contiguous)
     vim.api.nvim_buf_call(bufnr, function()
-        -- Must be in a window context; use the first window showing this buf
-        vim.cmd("silent! normal! zE") -- wipe existing manual folds
-
+        vim.cmd("silent! normal! zE")
         for i, row in ipairs(flat) do
-            if row.node.entry.is_folder or row.kind == "solution" then
+            if row.kind == "solution" or row.kind == "folder" then
                 local folder_depth = row.depth
                 local last = i
                 for j = i + 1, total do
@@ -220,13 +224,11 @@ local function apply_folds(bufnr, flat)
                     last = j
                 end
                 if last > i then
-                    -- Create fold from line i to last (1-indexed)
                     vim.cmd(string.format("silent! %d,%dfold", i, last))
                 end
             end
         end
-
-        vim.cmd("silent! normal! zR") -- open all folds (foldlevel=99 equivalent)
+        vim.cmd("silent! normal! zR")
     end)
 end
 
@@ -258,19 +260,23 @@ end
 function M.render(bufnr, sln_path, root)
     local parser = require("dotnet.parser")
     local state  = require("dotnet.state")
-    local flat = parser.flatten_tree(root, sln_path)
+    local flat   = parser.flatten_tree(root, sln_path)
 
-    -- Set flat before writing lines so anything that reads it during redraw
-    -- (e.g. foldexpr if still active) sees valid data
     local s = state.get(bufnr)
     if s then s.flat = flat end
 
     local lines = {}
     for _, row in ipairs(flat) do
-        local e = row.node.entry
+        local e      = row.node.entry
         local indent = string.rep(INDENT, row.depth)
-        local icon = entry_icon(e)
-        table.insert(lines, indent .. icon .. e.name)
+        local icon   = entry_icon(e)
+        local line
+        if e.is_folder or e.is_solution then
+            line = indent .. icon .. e.name
+        else
+            line = indent .. icon .. e.name .. SEP .. (e.path or "")
+        end
+        table.insert(lines, line)
     end
 
     vim.bo[bufnr].modifiable = true
@@ -284,31 +290,28 @@ function M.render(bufnr, sln_path, root)
         vim.bo[bufnr].modified = false
     end
 
-    local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
-    apply_decorations(bufnr, flat, cursor_lnum)
+    apply_decorations(bufnr, flat, vim.api.nvim_win_get_cursor(0)[1])
 
-    -- Apply folds after the buffer content is settled
     vim.schedule(function()
-        if not vim.api.nvim_buf_is_valid(bufnr) then return end
-        apply_folds(bufnr, flat)
+        if vim.api.nvim_buf_is_valid(bufnr) then
+            apply_folds(bufnr, flat)
+        end
     end)
 
     local aug = vim.api.nvim_create_augroup("DotnetView_" .. bufnr, { clear = true })
 
     vim.api.nvim_create_autocmd("CursorMoved", {
-        group  = aug,
-        buffer = bufnr,
+        group  = aug, buffer = bufnr,
         callback = function()
             local st = state.get(bufnr)
-            if not st or not st.flat then return end
-            apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+            if st and st.flat then
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+            end
         end,
     })
 
-    -- Safety net: block insert on line 1
     vim.api.nvim_create_autocmd("InsertEnter", {
-        group  = aug,
-        buffer = bufnr,
+        group  = aug, buffer = bufnr,
         callback = function()
             if vim.api.nvim_win_get_cursor(0)[1] == 1 then
                 vim.schedule(function() vim.cmd("stopinsert") end)
@@ -316,99 +319,141 @@ function M.render(bufnr, sln_path, root)
         end,
     })
 
-    -- TextChanged: only refresh decorations, never re-apply folds
-    -- (folds are manual and survive text changes)
     vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-        group  = aug,
-        buffer = bufnr,
+        group  = aug, buffer = bufnr,
         callback = function()
             local st = state.get(bufnr)
-            if not st or not st.flat then return end
-            apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+            if st and st.flat then
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+            end
         end,
     })
 end
 
--- ---------------------------------------------------------------------------
--- Foldexpr (kept for compatibility but not used with foldmethod=manual)
--- ---------------------------------------------------------------------------
-
+-- Stub — not used with foldmethod=manual
 function M.foldexpr(_) return "0" end
 
 -- ---------------------------------------------------------------------------
 -- parse_buffer
 -- ---------------------------------------------------------------------------
+--
+-- Strategy:
+--   For each buffer line i:
+--     - flat[i] exists → use flat[i].kind, read name/path from text
+--     - flat[i] nil (new/pasted line) → infer kind from path extension
+--
+-- Kind inference for new lines:
+--   - No path → folder
+--   - Path ends in *proj → project
+--   - Anything else → solution item
+--
+-- Solution items are attached as children of their nearest folder ancestor.
+-- On serialise, items that are children of a folder entry update that
+-- folder's solution_items list.
 
---- Reconstruct the full tree from indented buffer lines.
---- Line 1 is the solution row — skip it.
 ---@param bufnr integer
 ---@param original_flat table[]
----@return table root_node
+---@return table|nil root_node
 function M.parse_buffer(bufnr, original_flat)
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    if not original_flat or #original_flat == 0 then return nil end
 
-    local orig_by_name = {}
+    -- Build name+kind → ordered candidates map for fallback lookup
+    -- Keyed as "kind:name" to handle duplicate names across kinds
+    local candidates = {}
     for _, row in ipairs(original_flat) do
         if row.kind ~= "solution" then
-            local name = row.node.entry.name
-            if not orig_by_name[name] then orig_by_name[name] = {} end
-            table.insert(orig_by_name[name], row)
+            local key = row.kind .. ":" .. row.node.entry.name
+            if not candidates[key] then candidates[key] = {} end
+            table.insert(candidates[key], row)
         end
     end
-    local orig_consumed = {}
+    local consumed = {}
 
-    local root = { entry = nil, children = {} }
+    local root  = { entry = nil, children = {} }
     local stack = { { node = root, depth = 0 } }
 
-    for idx, line in ipairs(lines) do
-        if idx == 1 then goto continue end -- solution root line
+    local buf_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-        local name, depth = strip_prefix(line)
-        if name == "" then goto continue end
+    for idx, line in ipairs(buf_lines) do
+        if idx == 1 then goto continue end
+
+        local raw, depth = strip_prefix(line)
+        if raw == "" then goto continue end
+
+        local name, path = raw:match("^(.-)  +(.+)$")
+        if not name then name = raw; path = nil end
+        name = vim.trim(name)
+        path = path and vim.trim(path) or nil
 
         while #stack > 1 and stack[#stack].depth >= depth do
             table.remove(stack)
         end
         local parent = stack[#stack].node
 
-        local orig_row
-        local consumed_count = orig_consumed[name] or 0
-        local candidates = orig_by_name[name]
-        if candidates and candidates[consumed_count + 1] then
-            orig_row = candidates[consumed_count + 1]
-            orig_consumed[name] = consumed_count + 1
+        -- First try positional match (fast path, correct when flat is in sync)
+        local orig_row = original_flat[idx]
+        if orig_row and orig_row.node.entry.name ~= name then
+            orig_row = nil  -- positional mismatch — line shifted after dd/p
+        end
+
+        -- Fallback: name+kind lookup
+        if not orig_row then
+            -- Infer kind from path to find the right candidates bucket
+            local inferred_kind
+            if not path then
+                inferred_kind = "folder"
+            elseif path:match("%.[a-zA-Z]+proj$") or path:match("%.sln$") or path:match("%.slnx$") then
+                inferred_kind = "project"
+            else
+                inferred_kind = "item"
+            end
+            local key = inferred_kind .. ":" .. name
+            local n   = consumed[key] or 0
+            if candidates[key] and candidates[key][n + 1] then
+                orig_row       = candidates[key][n + 1]
+                consumed[key]  = n + 1
+            end
+        end
+
+        -- Determine kind
+        local kind
+        if orig_row then
+            kind = orig_row.kind
+        else
+            if not path then kind = "folder"
+            elseif path:match("%.[a-zA-Z]+proj$") or path:match("%.sln$") then kind = "project"
+            else kind = "item" end
         end
 
         local node
         if orig_row then
-            node = { entry = orig_row.node.entry, children = {} }
+            local entry = orig_row.node.entry
+            if name ~= entry.name or (path and not entry.is_folder and path ~= entry.path) then
+                entry = vim.deepcopy(entry)
+                entry.name = name
+                if path and not entry.is_folder then entry.path = path end
+            end
+            node = { entry = entry, children = {} }
         else
-            local is_item   = line:find(ICONS._item,   1, true) ~= nil
-            local is_folder = line:find(ICONS._folder, 1, true) ~= nil
-            node = {
-                entry = {
-                    name             = name,
-                    path             = name,
-                    type_guid        = is_folder and "2150E333-8FDC-42A3-9474-1A3956D46DE8" or nil,
-                    id               = nil,
-                    is_folder        = is_folder,
-                    is_solution_item = is_item,
-                },
-                children = {},
-            }
+            if kind == "folder" then
+                node = { entry = { name = name, path = name, type_guid = "2150E333-8FDC-42A3-9474-1A3956D46DE8", id = nil, is_folder = true }, children = {} }
+            elseif kind == "item" then
+                node = { entry = { name = name, path = path or name, is_solution_item = true, is_folder = false }, children = {} }
+            else
+                node = { entry = { name = name, path = path or "", type_guid = nil, id = nil, is_folder = false }, children = {} }
+            end
         end
 
         table.insert(parent.children, node)
-
-        if not node.entry.is_solution_item then
-            table.insert(stack, { node = node, depth = depth })
-        end
+        table.insert(stack, { node = node, depth = depth })
 
         ::continue::
     end
 
     return root
 end
+
+
 
 -- ---------------------------------------------------------------------------
 -- Highlights
@@ -439,7 +484,7 @@ end
 function M.setup_keymaps(bufnr)
     local opts = { buffer = bufnr, silent = true, noremap = true }
 
-    -- Block insert-entry keys on line 1
+    -- Block insert on line 1
     for _, key in ipairs({ "i", "I", "a", "A", "o", "O", "s", "S", "c", "C", "r", "R" }) do
         vim.keymap.set("n", key, function()
             if vim.api.nvim_win_get_cursor(0)[1] == 1 then return end
@@ -447,39 +492,38 @@ function M.setup_keymaps(bufnr)
         end, opts)
     end
 
+    -- <CR>: open project/item or toggle fold
     vim.keymap.set("n", "<CR>", function()
         local state = require("dotnet.state")
         local s = state.get(bufnr)
         if not s or not s.flat then return end
         local lnum = vim.api.nvim_win_get_cursor(0)[1]
-        local row = s.flat[lnum]
+        local row  = s.flat[lnum]
         if not row then return end
         local e = row.node.entry
         if e.is_solution or e.is_folder then
             vim.cmd("normal! za")
         else
-            local base = vim.fn.fnamemodify(s.sln_path, ":h")
-            vim.cmd.edit(vim.fn.fnameescape(base .. "/" .. e.path))
+            local full = vim.fn.fnamemodify(s.sln_path, ":h") .. "/" .. e.path
+            vim.cmd.edit(vim.fn.fnameescape(full))
         end
     end, opts)
 
+    -- dd: fold-aware delete
     vim.keymap.set("n", "dd", function()
         local state = require("dotnet.state")
         local s = state.get(bufnr)
-        if not s or not s.flat then
-            vim.cmd("normal! dd")
-            return
-        end
+        if not s or not s.flat then vim.cmd("normal! dd"); return end
         local lnum = vim.api.nvim_win_get_cursor(0)[1]
         if lnum == 1 then return end
         local row = s.flat[lnum]
-        if row and row.node.entry.is_folder then
+        if row and (row.kind == "folder" or row.kind == "solution") then
             local fold_end = vim.fn.foldclosedend(lnum)
             if fold_end ~= -1 then
                 vim.cmd(lnum .. "," .. fold_end .. "d _")
             else
                 local depth = row.depth
-                local last = lnum
+                local last  = lnum
                 for i = lnum + 1, #s.flat do
                     if s.flat[i].depth <= depth then break end
                     last = i
@@ -489,8 +533,12 @@ function M.setup_keymaps(bufnr)
         else
             vim.cmd("normal! dd")
         end
-        local st = state.get(bufnr)
-        if st then st.flat = nil end
+        vim.schedule(function()
+            local st = state.get(bufnr)
+            if st and st.flat then
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+            end
+        end)
     end, opts)
 
     vim.keymap.set("n", "q", "<CMD>bdelete<CR>", opts)
