@@ -390,28 +390,34 @@ function M.parse_buffer(bufnr, original_flat)
         end
         local parent = stack[#stack].node
 
-        -- First try positional match (fast path, correct when flat is in sync)
-        local orig_row = original_flat[idx]
-        if orig_row and orig_row.node.entry.name ~= name then
-            orig_row = nil  -- positional mismatch — line shifted after dd/p
+        -- Determine kind from the line's icon (reliable since we control rendering)
+        local line_kind
+        do
+            local i2 = 1
+            while i2 <= #line and line:byte(i2) == 0x20 do i2 = i2 + 1 end
+            local rest = line:sub(i2)
+            if rest:sub(1, #ICONS._solution) == ICONS._solution then line_kind = "solution"
+            elseif rest:sub(1, #ICONS._folder) == ICONS._folder   then line_kind = "folder"
+            elseif rest:sub(1, #ICONS._item)   == ICONS._item     then line_kind = "item"
+            else                                                        line_kind = "project"
+            end
         end
 
-        -- Fallback: name+kind lookup
+        -- Positional match: use flat[idx] if its kind matches what we see on screen.
+        -- Kind match handles renames (name changed, same kind = same entry).
+        -- Kind mismatch means lines shifted after dd/p — fall through to name lookup.
+        local orig_row = original_flat[idx]
+        if orig_row and orig_row.kind ~= line_kind then
+            orig_row = nil
+        end
+
+        -- Fallback: name+kind lookup for shifted/inserted lines
         if not orig_row then
-            -- Infer kind from path to find the right candidates bucket
-            local inferred_kind
-            if not path then
-                inferred_kind = "folder"
-            elseif path:match("%.[a-zA-Z]+proj$") or path:match("%.sln$") or path:match("%.slnx$") then
-                inferred_kind = "project"
-            else
-                inferred_kind = "item"
-            end
-            local key = inferred_kind .. ":" .. name
+            local key = line_kind .. ":" .. name
             local n   = consumed[key] or 0
             if candidates[key] and candidates[key][n + 1] then
-                orig_row       = candidates[key][n + 1]
-                consumed[key]  = n + 1
+                orig_row      = candidates[key][n + 1]
+                consumed[key] = n + 1
             end
         end
 
