@@ -2,7 +2,7 @@
 
 local M = {}
 
----@type table<integer, {sln_path: string, fmt: string, raw: string, raw_bytes: string, root: table, nesting: table, nesting_ordered: table[], flat: table[]}>
+---@type table<integer, {sln_path: string, fmt: string, raw: string, raw_bytes: string, root: table, nesting: table, nesting_ordered: table[], flat: table[], rendering: boolean}>
 local _state = {}
 
 function M.set(bufnr, entry) _state[bufnr] = entry end

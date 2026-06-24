@@ -89,11 +89,12 @@ local function entry_icon(entry)
     if entry.is_solution      then return ICONS._solution, HL.header end
     if entry.is_folder        then return ICONS._folder,   HL.folder end
     if entry.is_solution_item then return ICONS._item,     HL.item   end
-    local ext = entry.path and entry.path:match("%.([^%.]+)$")
+    local filename = entry.path and entry.path:match("([^/\\]+)$") or entry.name
+    local ext = filename and filename:match("%.([^%.]+)$")
     if ext and PROJECT_ICONS[ext:lower()] then
         return PROJECT_ICONS[ext:lower()], HL.icon
     end
-    return get_icon_for_file(entry.name)
+    return get_icon_for_file(filename or entry.name)
 end
 
 -- ---------------------------------------------------------------------------
@@ -248,9 +249,11 @@ function M.render(bufnr, sln_path, root)
     local flat   = parser.flatten_tree(root, sln_path)
 
     local s = state.get(bufnr)
-    if s then s.flat = flat end
+    if s then
+        s.flat        = flat
+        s.rendering   = true  -- suppress TextChanged during bulk line write
+    end
 
-    -- Buffer lines contain only: indent + icon + name  (NO path)
     local lines = {}
     for _, row in ipairs(flat) do
         local e      = row.node.entry
@@ -264,6 +267,8 @@ function M.render(bufnr, sln_path, root)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     vim.bo[bufnr].modified   = false
     vim.bo[bufnr].modifiable = true
+
+    if s then s.rendering = false end
 
     if vim.api.nvim_buf_line_count(bufnr) == 0 then
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "" })
@@ -301,7 +306,9 @@ function M.render(bufnr, sln_path, root)
         group = aug, buffer = bufnr,
         callback = function()
             local st = state.get(bufnr)
-            if st and st.flat then apply_decorations(bufnr, st.flat) end
+            if st and st.flat and not st.rendering then
+                apply_decorations(bufnr, st.flat)
+            end
         end,
     })
 end
@@ -380,6 +387,12 @@ function M.parse_buffer(bufnr, original_flat)
             end
         end
 
+        -- Infer kind: if parent is a folder with solution_items, new child is an item
+        local parent_entry = parent.entry
+        local parent_has_items = parent_entry
+            and parent_entry.is_folder
+            and parent_entry.solution_items ~= nil
+
         local node
         if orig_row then
             local entry = orig_row.node.entry
@@ -387,14 +400,29 @@ function M.parse_buffer(bufnr, original_flat)
                 entry = vim.deepcopy(entry)
                 entry.name = name
             end
+            -- Mark consumed so name fallback can't re-match this entry
+            local key = orig_row.kind .. ":" .. orig_row.node.entry.name
+            consumed[key] = (consumed[key] or 0) + 1
             node = { entry = entry, children = {} }
         else
             if line_kind == "folder" then
                 node = { entry = { name = name, path = name,
                     type_guid = "2150E333-8FDC-42A3-9474-1A3956D46DE8",
                     id = nil, is_folder = true }, children = {} }
-            elseif line_kind == "item" then
-                node = { entry = { name = name, path = "",
+            elseif line_kind == "item" or parent_has_items then
+                -- Only create a new item if this name doesn't look like a shifted
+                -- duplicate — i.e. if candidates for this name are exhausted.
+                -- If candidates still has unconsumed entries for this name,
+                -- this line is a phantom from a shift and should be skipped.
+                local item_key = "item:" .. name
+                local n = consumed[item_key] or 0
+                local avail = candidates[item_key] and #candidates[item_key] or 0
+                if n < avail then
+                    -- Unconsumed candidate exists — this is a shifted duplicate, skip it
+                    consumed[item_key] = n + 1
+                    goto continue
+                end
+                node = { entry = { name = name, path = name,
                     is_solution_item = true, is_folder = false }, children = {} }
             else
                 node = { entry = { name = name, path = "",
@@ -473,6 +501,15 @@ function M.setup_keymaps(bufnr)
             vim.bo[bufnr].modifiable = true
             vim.api.nvim_buf_set_lines(bufnr, buf_insert, buf_insert, false, { indent })
             vim.bo[bufnr].modifiable = true
+
+            -- Insert a placeholder into flat so apply_decorations doesn't
+            -- mis-map subsequent entries to the wrong lines
+            table.insert(s.flat, buf_insert + 1, {
+                node  = { entry = { name = "", path = "", is_folder = false }, children = {} },
+                depth = depth,
+                kind  = "project",
+            })
+
             vim.api.nvim_win_set_cursor(0, { buf_insert + 1, #indent })
             vim.cmd("startinsert!")
         end, opts)
