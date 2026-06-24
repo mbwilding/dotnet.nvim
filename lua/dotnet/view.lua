@@ -141,7 +141,8 @@ end
 ---@param bufnr integer
 ---@param flat table[]
 ---@param cursor_lnum integer 1-indexed
-local function apply_decorations(bufnr, flat, cursor_lnum)
+---@param show_paths boolean  true = reveal paths (insert mode), false = conceal (normal mode)
+local function apply_decorations(bufnr, flat, cursor_lnum, show_paths)
     vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
 
     local state = require("dotnet.state")
@@ -188,18 +189,28 @@ local function apply_decorations(bufnr, flat, cursor_lnum)
             })
         end
 
-        -- Path (inline, after SEP separator)
+        -- Path: concealed in normal mode, revealed in insert mode.
+        -- Missing files are always shown (red) regardless of mode.
         if not e.is_folder and not e.is_solution then
-            local path_col = name_col + #e.name + #SEP
+            local sep_col  = name_col + #e.name
+            local path_col = sep_col + #SEP
             if path_col < line_len then
                 local path_hl = is_missing and HL.missing
                     or (e.is_solution_item and HL.item or HL.path)
-                vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, path_col, {
-                    end_col  = line_len,
-                    hl_group = path_hl,
-                    hl_mode  = "replace",
-                    priority = 15,
-                })
+                if show_paths or is_missing then
+                    vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, sep_col, {
+                        end_col  = line_len,
+                        hl_group = path_hl,
+                        hl_mode  = "replace",
+                        priority = 15,
+                    })
+                else
+                    vim.api.nvim_buf_set_extmark(bufnr, NS, lnum, sep_col, {
+                        end_col  = line_len,
+                        conceal  = "",
+                        priority = 15,
+                    })
+                end
             end
         end
     end
@@ -247,7 +258,7 @@ local function set_win_options(winid)
     wo.cursorline   = true
     wo.foldmethod   = "manual"
     wo.foldlevel    = 99
-    wo.conceallevel = 0
+    wo.conceallevel = 2  -- hides concealed path text in normal mode
 end
 
 -- ---------------------------------------------------------------------------
@@ -290,7 +301,7 @@ function M.render(bufnr, sln_path, root)
         vim.bo[bufnr].modified = false
     end
 
-    apply_decorations(bufnr, flat, vim.api.nvim_win_get_cursor(0)[1])
+    apply_decorations(bufnr, flat, vim.api.nvim_win_get_cursor(0)[1], false)
 
     vim.schedule(function()
         if vim.api.nvim_buf_is_valid(bufnr) then
@@ -305,7 +316,7 @@ function M.render(bufnr, sln_path, root)
         callback = function()
             local st = state.get(bufnr)
             if st and st.flat then
-                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1], false)
             end
         end,
     })
@@ -315,6 +326,23 @@ function M.render(bufnr, sln_path, root)
         callback = function()
             if vim.api.nvim_win_get_cursor(0)[1] == 1 then
                 vim.schedule(function() vim.cmd("stopinsert") end)
+                return
+            end
+            -- Reveal paths when entering insert mode
+            local st = state.get(bufnr)
+            if st and st.flat then
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1], true)
+            end
+        end,
+    })
+
+    vim.api.nvim_create_autocmd("InsertLeave", {
+        group  = aug, buffer = bufnr,
+        callback = function()
+            -- Conceal paths when leaving insert mode
+            local st = state.get(bufnr)
+            if st and st.flat then
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1], false)
             end
         end,
     })
@@ -323,9 +351,9 @@ function M.render(bufnr, sln_path, root)
         group  = aug, buffer = bufnr,
         callback = function()
             local st = state.get(bufnr)
-            if st and st.flat then
-                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
-            end
+            if not st or not st.flat then return end
+            local in_insert = vim.api.nvim_get_mode().mode:sub(1,1) == "i"
+            apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1], in_insert)
         end,
     })
 end
@@ -542,7 +570,7 @@ function M.setup_keymaps(bufnr)
         vim.schedule(function()
             local st = state.get(bufnr)
             if st and st.flat then
-                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1])
+                apply_decorations(bufnr, st.flat, vim.api.nvim_win_get_cursor(0)[1], false)
             end
         end)
     end, opts)
