@@ -42,6 +42,8 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 | `zo` / `zc` | Open / close fold |
 | `zR` / `zM` | Expand all / collapse all |
 | `q` | Close the solution buffer |
+| `o` / `O` | Open file picker to add a new project below / above cursor |
+| `gf` | Pick a new file path for the project/item under cursor |
 | `gp` | Open the raw solution file |
 | `<C-r>` | Reload from disk, discarding unsaved changes |
 | `:w` | Save all changes back to the solution file |
