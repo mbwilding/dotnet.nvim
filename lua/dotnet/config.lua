@@ -1,14 +1,22 @@
---- Default configuration for dotnet.nvim.
---- Call require("dotnet").setup(opts) to override.
-
 local M = {}
 
+---@class dotnet.KeymapsConfig
+---@field toggle string|false Toggle the solution view (default: "<leader>ds")
+---@field enable string|false Enable interception of .sln/.slnx/.slnf files (default: false)
+---@field disable string|false Disable interception of .sln/.slnx/.slnf files (default: false)
+
 ---@class dotnet.Config
----@field keymap string|false Global keymap to toggle the solution view (default: "<leader>ds")
+---@field enabled boolean Whether the solution view intercepts .sln/.slnx/.slnf files (default: true)
+---@field keymaps dotnet.KeymapsConfig Global keybinds. Set an entry to false to disable it.
 
 ---@type dotnet.Config
 M.values = {
-    keymap = "<leader>ds",
+    enabled = true,
+    keymaps = {
+        toggle = "<leader>ds",
+        enable = false,
+        disable = false,
+    },
 }
 
 ---@param opts? dotnet.Config
