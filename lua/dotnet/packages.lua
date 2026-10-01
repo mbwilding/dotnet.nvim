@@ -16,6 +16,8 @@ local NS = vim.api.nvim_create_namespace("dotnet_packages")
 ---@field latest string
 ---@field outdated boolean
 ---@field transitive boolean
+---@field deps table<string, string>
+---@field via table<string, boolean>
 ---@field usages dotnet.Usage[]
 
 ---@param path string
@@ -126,6 +128,75 @@ local function problems_of(json)
     return out
 end
 
+---@param path string
+---@return table|nil
+local function read_assets(path)
+    local fh = io.open(path, "rb")
+    if not fh then
+        return nil
+    end
+    local text = fh:read("*a")
+    fh:close()
+    local ok, json = pcall(vim.json.decode, text)
+    return ok and type(json) == "table" and json or nil
+end
+
+---@param pkgs dotnet.Package[]
+---@param all table
+local function attach_graph(pkgs, all)
+    local by_id = {}
+    for _, pkg in ipairs(pkgs) do
+        by_id[pkg.id:lower()] = pkg
+        pkg.deps = {}
+        pkg.via = {}
+    end
+    for _, proj in ipairs(all.projects or {}) do
+        local assets = read_assets(vim.fs.joinpath(vim.fs.dirname(proj.path), "obj", "project.assets.json"))
+        if assets and assets.targets then
+            local roots = {}
+            for _, pkg in ipairs(pkgs) do
+                for _, u in ipairs(pkg.usages) do
+                    if u.project == proj.path and not u.transitive then
+                        table.insert(roots, pkg)
+                        break
+                    end
+                end
+            end
+            for _, target in pairs(assets.targets) do
+                local index = {}
+                for key, entry in pairs(target) do
+                    local id, version = key:match("^(.-)/(.+)$")
+                    if id and entry.type == "package" then
+                        index[id:lower()] = { id = id, version = version, deps = entry.dependencies or {} }
+                    end
+                end
+                for _, root in ipairs(roots) do
+                    local seen = {}
+                    local function walk(id)
+                        local node = index[id:lower()]
+                        if not node then
+                            return
+                        end
+                        for dep in pairs(node.deps) do
+                            local d = index[dep:lower()]
+                            if d and not seen[dep:lower()] then
+                                seen[dep:lower()] = true
+                                root.deps[d.id] = d.version
+                                local target_pkg = by_id[d.id:lower()]
+                                if target_pkg and target_pkg ~= root then
+                                    target_pkg.via[root.id] = true
+                                end
+                                walk(dep)
+                            end
+                        end
+                    end
+                    walk(root.id)
+                end
+            end
+        end
+    end
+end
+
 ---@param all table
 ---@return string[]
 local function project_paths(all)
@@ -155,7 +226,9 @@ function M.discover(scope, prerelease, cb)
                 return
             end
             list_json(scope, prerelease and { "--outdated", "--include-prerelease" } or { "--outdated" }, true, function(outdated)
-                cb(M.parse(all, outdated), problems_of(all), project_paths(all))
+                local pkgs = M.parse(all, outdated)
+                attach_graph(pkgs, all)
+                cb(pkgs, problems_of(all), project_paths(all))
             end)
         end)
     end
@@ -327,6 +400,7 @@ end
 ---@field loading boolean
 ---@field browse_versions table<string, string>
 ---@field prerelease boolean
+---@field positioned boolean?
 ---@field vlines table[]
 ---@field win integer?
 ---@field width integer
@@ -334,8 +408,14 @@ end
 ---@type table<integer, dotnet.PackagesView>
 local views = {}
 
-local TABS = { "installed", "upgrades", "consolidate", "browse" }
-local TAB_TITLES = { installed = "Installed", upgrades = "Upgrades", consolidate = "Consolidate", browse = "Browse" }
+local TABS = { "installed", "transitive", "upgrades", "consolidate", "browse" }
+local TAB_TITLES = {
+    installed = "Installed",
+    transitive = "Transitive",
+    upgrades = "Upgrades",
+    consolidate = "Consolidate",
+    browse = "Browse",
+}
 local MAX_NAME = 48
 
 ---@param ver string
@@ -426,8 +506,9 @@ end
 ---@param v dotnet.PackagesView
 ---@return table<string, integer>
 local function counts(v)
-    local c = { installed = #v.pkgs, upgrades = 0, consolidate = 0, browse = #v.results }
+    local c = { installed = 0, transitive = 0, upgrades = 0, consolidate = 0, browse = #v.results }
     for _, pkg in ipairs(v.pkgs) do
+        c[pkg.transitive and "transitive" or "installed"] = c[pkg.transitive and "transitive" or "installed"] + 1
         if pkg.outdated then
             c.upgrades = c.upgrades + 1
         end
@@ -438,12 +519,50 @@ local function counts(v)
     return c
 end
 
+local ICON = {
+    open = vim.fn.nr2char(0xf0d7),
+    closed = vim.fn.nr2char(0xf0da),
+    on = vim.fn.nr2char(0xf046),
+    off = vim.fn.nr2char(0xf096),
+}
+
+local function setup_highlights()
+    require("volt.highlights")
+    local function get(name)
+        local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+        return ok and h or {}
+    end
+    local normal = get("Normal")
+    local band = get("ExBlack2Bg").bg or get("CursorLine").bg
+    local band2 = get("ExBlack3Bg").bg or get("Visual").bg
+    local blue = get("ExBlue").fg or get("Function").fg
+    local green = get("ExGreen").fg or get("DiagnosticOk").fg
+    local yellow = get("ExYellow").fg or get("DiagnosticWarn").fg
+    local muted = get("CommentFg").fg or get("Comment").fg
+    local set = vim.api.nvim_set_hl
+    set(0, "DotnetPkgBand", { bg = band, fg = normal.fg })
+    set(0, "DotnetPkgTitle", { bg = band, fg = blue, bold = true })
+    set(0, "DotnetPkgMuted", { bg = band, fg = muted })
+    set(0, "DotnetPkgKey", { bg = band, fg = yellow, bold = true })
+    set(0, "DotnetPkgTabOn", { bg = blue, fg = normal.bg or 0, bold = true })
+    set(0, "DotnetPkgTabOff", { bg = band2, fg = muted })
+    set(0, "DotnetPkgColHead", { bg = band2, fg = muted, bold = true })
+    set(0, "DotnetPkgGroup", { bg = band2, fg = blue, bold = true })
+    set(0, "DotnetPkgName", { fg = normal.fg })
+    set(0, "DotnetPkgLink", { fg = blue })
+    set(0, "DotnetPkgDim", { fg = muted })
+    set(0, "DotnetPkgOk", { fg = green })
+    set(0, "DotnetPkgWarn", { fg = yellow })
+    set(0, "DotnetPkgRule", { fg = band2 or muted })
+end
+
 ---@param v dotnet.PackagesView
 local function paint(v)
     local buf = v.buf
     if not vim.api.nvim_buf_is_valid(buf) then
         return
     end
+    setup_highlights()
     local cursor = v.win and vim.api.nvim_win_is_valid(v.win) and vim.api.nvim_win_get_cursor(v.win) or nil
     local volt = require("volt")
     vim.bo[buf].modifiable = true
@@ -452,7 +571,7 @@ local function paint(v)
         {
             buf = buf,
             ns = NS,
-            xpad = 1,
+            xpad = 0,
             layout = {
                 {
                     name = "list",
@@ -469,58 +588,117 @@ local function paint(v)
     end
 end
 
+local HINTS = {
+    { "<CR>", "fold" },
+    { "<Tab>", "select" },
+    { "u", "update" },
+    { "U", "update all" },
+    { "v", "version" },
+    { "a", "add" },
+    { "d", "remove" },
+    { "/", "search" },
+    { "P", "prerelease" },
+    { "[ ]", "tabs" },
+    { "r", "refresh" },
+    { "q", "close" },
+}
+
+local COLUMNS = {
+    installed = { "Package", "Installed", "Latest", "Used by" },
+    transitive = { "Package", "Resolved", "Required by", "Used by" },
+    upgrades = { "Package", "Installed", "Latest", "Used by" },
+    consolidate = { "Package", "Declared", "Target", "Used by" },
+    browse = { "Package", "Version", "Downloads", "Status" },
+}
+
+---@param text string
+---@param w integer
+---@return string
+local function fit(text, w)
+    local len = vim.fn.strwidth(text)
+    if len > w then
+        return vim.fn.strcharpart(text, 0, w - 1) .. "…"
+    end
+    return text .. string.rep(" ", w - len)
+end
+
 ---@param v dotnet.PackagesView
 local function render(v)
     local c = counts(v)
     local vl, rows = {}, {}
+    local W = v.width
+
     local function line(cells)
         table.insert(vl, cells)
         return #vl
     end
+    local function band(cells, hl)
+        local used = 0
+        for _, cell in ipairs(cells) do
+            used = used + vim.fn.strwidth(cell[1])
+        end
+        table.insert(cells, { string.rep(" ", math.max(W - used, 0)), hl })
+        return line(cells)
+    end
+    local function rule()
+        line({ { string.rep("─", W), "DotnetPkgRule" } })
+    end
 
     local title = {
-        { "NuGet  ", "Title" },
-        { vim.fn.fnamemodify(v.scope, ":t"), "Identifier" },
-        { "  " .. v.status, "Comment" },
-        v.prerelease and { "  [prerelease]", "WarningMsg" } or nil,
+        { "  ", "DotnetPkgBand" },
+        { " NuGet ", "DotnetPkgTabOn" },
+        { "  " .. vim.fn.fnamemodify(v.scope, ":t"), "DotnetPkgTitle" },
     }
-    if v.tab == "browse" then
-        table.insert(title, { "  search: ", "Comment" })
-        table.insert(title, { v.query ~= "" and v.query or "(press /)", "String" })
+    if v.prerelease then
+        table.insert(title, { "  prerelease", "DotnetPkgKey" })
     end
-    line(title)
+    if v.status ~= "" then
+        table.insert(title, { "  " .. v.status, "DotnetPkgMuted" })
+    end
+    if v.tab == "browse" then
+        table.insert(title, { "   search: ", "DotnetPkgMuted" })
+        table.insert(title, { v.query ~= "" and v.query or "press /", "DotnetPkgBand" })
+    end
+    band(title, "DotnetPkgBand")
 
-    local tabcells = {}
+    local tabs = { { "  ", "DotnetPkgBand" } }
     for _, t in ipairs(TABS) do
-        table.insert(tabcells, {
-            string.format(" %s (%d) ", TAB_TITLES[t], c[t]),
-            t == v.tab and "TabLineSel" or "TabLine",
+        table.insert(tabs, {
+            string.format(" %s  %d ", TAB_TITLES[t], c[t]),
+            t == v.tab and "DotnetPkgTabOn" or "DotnetPkgTabOff",
             function()
                 v.tab = t
                 v.selected = {}
                 render(v)
             end,
         })
-        table.insert(tabcells, { " " })
+        table.insert(tabs, { " ", "DotnetPkgBand" })
     end
-    line(tabcells)
-    line({
-        {
-            "<CR> fold  <Tab> select  u update  U all  v version  a add  d remove  / search  P prerelease  [ ] tab  r refresh  q close",
-            "Comment",
-        },
-    })
-    line({ { " " } })
+    band(tabs, "DotnetPkgBand")
 
-    local width = 0
+    local hints = { { "  ", "DotnetPkgBand" } }
+    for _, h in ipairs(HINTS) do
+        table.insert(hints, { h[1], "DotnetPkgKey" })
+        table.insert(hints, { " " .. h[2] .. "   ", "DotnetPkgMuted" })
+    end
+    band(hints, "DotnetPkgBand")
+
+    local namew = 12
+    local verw = 14
     for _, pkg in ipairs(v.pkgs) do
-        width = math.max(width, #pkg.id)
+        namew = math.max(namew, math.min(#pkg.id, MAX_NAME))
+        verw = math.max(verw, math.min(#current_text(pkg), 24), math.min(#pkg.latest, 24))
     end
-    width = math.min(width, MAX_NAME)
+    namew = namew + 2
+    verw = verw + 2
 
-    local function pad(text)
-        return text .. string.rep(" ", math.max(width - #text, 0) + 2)
-    end
+    local cols = COLUMNS[v.tab]
+    band({
+        { "    " .. fit(cols[1], namew), "DotnetPkgColHead" },
+        { fit(cols[2], verw), "DotnetPkgColHead" },
+        { fit(cols[3], v.tab == "transitive" and verw + 22 or verw), "DotnetPkgColHead" },
+        { cols[4], "DotnetPkgColHead" },
+    }, "DotnetPkgColHead")
 
     local function target(pkg)
         if v.tab == "consolidate" then
@@ -544,13 +722,24 @@ local function render(v)
     local function select_cell(row)
         local on = v.selected[row_key(row)]
         return {
-            on and "[x] " or "[ ] ",
-            on and "String" or "Comment",
+            (on and ICON.on or ICON.off) .. " ",
+            on and "DotnetPkgOk" or "DotnetPkgDim",
             function()
                 v.selected[row_key(row)] = not on or nil
                 render(v)
             end,
         }
+    end
+
+    local function third_cell(pkg, actionable)
+        if v.tab == "transitive" then
+            local names = vim.tbl_keys(pkg.via or {})
+            table.sort(names, function(a, b)
+                return a:lower() < b:lower()
+            end)
+            return { fit(table.concat(names, ", "), verw + 20) .. "  ", "DotnetPkgLink" }
+        end
+        return { fit(actionable and ("→ " .. target(pkg)) or "", verw), "DotnetPkgOk" }
     end
 
     local function add_pkg(pkg, indent)
@@ -561,34 +750,65 @@ local function render(v)
             actionable = actionable or needs_update(pkg, u)
         end
         local open = is_open(v, prow.key, v.tab ~= "installed" and actionable)
-        local name_hl = actionable and "WarningMsg" or (pkg.transitive and "Comment" or "Identifier")
+        local cur = current_text(pkg)
         prow.line = line({
             {
-                indent .. (open and "▾ " or "▸ "),
-                "Comment",
+                indent .. (open and ICON.open or ICON.closed) .. " ",
+                "DotnetPkgDim",
                 function()
                     v.expanded[prow.key] = not open
                     render(v)
                 end,
             },
             select_cell(prow),
-            { pad(pkg.id), name_hl },
-            { current_text(pkg), "Comment" },
-            actionable and { "  ->  " .. target(pkg), "WarningMsg" } or nil,
+            { fit(pkg.id, namew), pkg.transitive and "DotnetPkgDim" or "DotnetPkgName" },
+            { fit(cur, verw), cur == "mixed" and "DotnetPkgWarn" or "DotnetPkgDim" },
+            third_cell(pkg, actionable),
+            { string.format("%d project%s", #pkg.usages, #pkg.usages == 1 and "" or "s"), "DotnetPkgDim" },
         })
         if not open then
             return
         end
-        for _, u in ipairs(pkg.usages) do
+        for i, u in ipairs(pkg.usages) do
             local urow = { kind = "proj", pkg = pkg, usage = u }
             table.insert(rows, urow)
             urow.line = line({
-                { indent .. "    ", "Comment" },
+                { indent .. "  " .. (i == #pkg.usages and "└" or "├") .. " ", "DotnetPkgRule" },
                 select_cell(urow),
-                { vim.fn.fnamemodify(u.project, ":t:r") .. "  ", "Comment" },
-                { u.requested .. (u.transitive and " (transitive)" or ""), "Comment" },
-                needs_update(pkg, u) and { "  ->  " .. target(pkg), "WarningMsg" } or nil,
+                { fit(vim.fn.fnamemodify(u.project, ":t:r"), namew - 2), "DotnetPkgLink" },
+                { fit(u.requested, verw), "DotnetPkgDim" },
+                { fit(needs_update(pkg, u) and ("→ " .. target(pkg)) or "", verw), "DotnetPkgOk" },
+                { u.transitive and "transitive" or "", "DotnetPkgDim" },
             })
+        end
+        local dep_ids = vim.tbl_keys(pkg.deps or {})
+        if #dep_ids > 0 then
+            table.sort(dep_ids, function(a, b)
+                return a:lower() < b:lower()
+            end)
+            local drow = { kind = "group", key = v.tab .. ":deps:" .. pkg.id }
+            table.insert(rows, drow)
+            local dopen = is_open(v, drow.key, false)
+            drow.line = line({
+                {
+                    indent .. "  " .. (dopen and ICON.open or ICON.closed) .. " Dependencies (" .. #dep_ids .. ")",
+                    "DotnetPkgDim",
+                    function()
+                        v.expanded[drow.key] = not dopen
+                        render(v)
+                    end,
+                },
+            })
+            if dopen then
+                for i, id in ipairs(dep_ids) do
+                    line({
+                        { indent .. "    " .. (i == #dep_ids and "└" or "├") .. " ", "DotnetPkgRule" },
+                        { "  ", "DotnetPkgDim" },
+                        { fit(id, namew - 2), "DotnetPkgDim" },
+                        { fit(pkg.deps[id], verw), "DotnetPkgDim" },
+                    })
+                end
+            end
         end
     end
 
@@ -602,64 +822,45 @@ local function render(v)
             table.insert(rows, row)
             local have = installed[res.id:lower()]
             row.line = line({
+                { "  ", "DotnetPkgDim" },
                 select_cell(row),
-                { pad(res.id), have and "Comment" or "Identifier" },
-                { v.browse_versions[res.id] or res.version, "String" },
-                { string.format("  %s downloads", res.downloads), "Comment" },
-                have and { "  (installed " .. have .. ")", "Comment" } or nil,
+                { fit(res.id, namew), have and "DotnetPkgDim" or "DotnetPkgName" },
+                { fit(v.browse_versions[res.id] or res.version, verw), "DotnetPkgOk" },
+                { fit(res.downloads, verw), "DotnetPkgDim" },
+                { have and ("installed " .. have) or "", "DotnetPkgWarn" },
             })
         end
         if v.loading then
-            line({ { "searching...", "Comment" } })
-        elseif #v.results == 0 and v.query ~= "" then
-            line({ { "no results", "Comment" } })
+            line({ { "  searching...", "DotnetPkgDim" } })
+        elseif #v.results == 0 then
+            line({ { v.query ~= "" and "  no results" or "  press / to search", "DotnetPkgDim" } })
         end
     end
 
-    local transitive = {}
     for _, pkg in ipairs(v.pkgs) do
-        local include = v.tab ~= "browse"
-        if v.tab == "installed" then
-            include = true
+        local include = not pkg.transitive
+        if v.tab == "browse" then
+            include = false
+        elseif v.tab == "transitive" then
+            include = pkg.transitive
         elseif v.tab == "upgrades" then
             include = pkg.outdated
         elseif v.tab == "consolidate" then
             include = #direct_versions(pkg) > 1
         end
         if include then
-            if pkg.transitive then
-                table.insert(transitive, pkg)
-            else
-                add_pkg(pkg, "")
-            end
+            add_pkg(pkg, "")
         end
     end
-    if #transitive > 0 then
-        local grow = { kind = "group", key = v.tab .. ":group:transitive" }
-        table.insert(rows, grow)
-        local open = is_open(v, grow.key, false)
-        grow.line = line({
-            {
-                (open and "▾ " or "▸ ") .. string.format("Transitive (%d)", #transitive),
-                "Title",
-                function()
-                    v.expanded[grow.key] = not open
-                    render(v)
-                end,
-            },
-        })
-        if open then
-            for _, pkg in ipairs(transitive) do
-                add_pkg(pkg, "  ")
-            end
-        end
+    if v.tab ~= "browse" and #rows == 0 and v.status == "" then
+        line({ { "  nothing to show", "DotnetPkgDim" } })
     end
 
     if #v.problems > 0 then
-        line({ { " " } })
-        line({ { "Skipped:", "DiagnosticWarn" } })
+        rule()
+        line({ { "  Skipped projects", "DotnetPkgWarn" } })
         for _, p in ipairs(v.problems) do
-            line({ { "  " .. p, "DiagnosticWarn" } })
+            line({ { "    " .. p, "DotnetPkgDim" } })
         end
     end
 
@@ -670,7 +871,7 @@ end
 
 ---@param v dotnet.PackagesView
 local function refresh(v)
-    v.status = "(loading...)"
+    v.status = "loading..."
     render(v)
     M.discover(v.scope, v.prerelease, function(pkgs, problems, projects)
         if not vim.api.nvim_buf_is_valid(v.buf) then
@@ -680,8 +881,12 @@ local function refresh(v)
         v.projects = projects or {}
         v.problems = problems
         v.selected = {}
-        v.status = pkgs and "" or "(error)"
+        v.status = pkgs and "" or "error"
         render(v)
+        if not v.positioned and v.rows[1] and vim.api.nvim_win_is_valid(v.win) then
+            v.positioned = true
+            vim.api.nvim_win_set_cursor(v.win, { v.rows[1].line, 0 })
+        end
     end)
 end
 
@@ -898,7 +1103,8 @@ function M.open(scope)
         v.tab = TABS[(idx - 1 + delta) % #TABS + 1]
         v.selected = {}
         render(v)
-        vim.api.nvim_win_set_cursor(0, { math.min(5, vim.api.nvim_buf_line_count(buf)), 0 })
+        local first = v.rows[1]
+        vim.api.nvim_win_set_cursor(0, { first and first.line or 1, 0 })
     end
     map("]", function()
         switch_tab(1)
@@ -1142,18 +1348,31 @@ function M.open(scope)
         end,
     })
 
-    local cols = vim.o.columns
-    local lines = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus > 0 and 1 or 0)
-    v.width = cols
-    v.win = vim.api.nvim_open_win(buf, true, {
-        relative = "editor",
-        width = cols,
-        height = lines,
-        col = 0,
-        row = 0,
-        style = "minimal",
-        border = "none",
-        zindex = 50,
+    local function fullscreen()
+        return {
+            relative = "editor",
+            width = vim.o.columns,
+            height = vim.o.lines - vim.o.cmdheight - (vim.o.laststatus > 0 and 1 or 0),
+            col = 0,
+            row = 0,
+        }
+    end
+    v.width = vim.o.columns
+    v.win = vim.api.nvim_open_win(
+        buf,
+        true,
+        vim.tbl_extend("force", fullscreen(), { style = "minimal", border = "none", zindex = 50 })
+    )
+    vim.api.nvim_create_autocmd({ "VimResized", "WinResized" }, {
+        group = vim.api.nvim_create_augroup("DotnetPackages" .. buf, { clear = true }),
+        callback = function()
+            if not vim.api.nvim_win_is_valid(v.win) then
+                return true
+            end
+            vim.api.nvim_win_set_config(v.win, fullscreen())
+            v.width = vim.o.columns
+            render(v)
+        end,
     })
     vim.wo[v.win].cursorline = true
     vim.wo[v.win].wrap = false

@@ -1,6 +1,6 @@
 # dotnet.nvim
 
-A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.slnx`, and `.slnf` files as an editable tree buffer. See [Dependencies](#dependencies).
+A Neovim plugin for .NET. Opens `.sln`, `.slnx`, and `.slnf` files as an editable tree buffer, and provides a full-screen, Rider-style NuGet package manager for solutions and projects. See [Dependencies](#dependencies).
 
 ## Features
 
@@ -15,6 +15,13 @@ A Neovim plugin for viewing and editing .NET solution files. Opens `.sln`, `.sln
 - Fold-aware `dd` — deleting a folder line deletes its entire subtree
 - Solution root line is not editable
 - Configurable keybinds toggle the view, or enable/disable interception entirely, from anywhere
+- Full-screen NuGet package manager (`:Dotnet packages`) built on [volt](https://github.com/NvChad/volt):
+  - Installed, Transitive, Upgrades, Consolidate and Browse tabs
+  - Update packages to latest, pick any version, or consolidate mismatched versions across projects
+  - Search, add and remove packages across the whole solution or per project
+  - Transitive packages in their own tab, plus per-package dependency lists
+  - Optional prerelease support, mouse and keyboard driven
+  - Works with inline versions and Central Package Management (`Directory.Packages.props`)
 
 ## File Format Support
 
@@ -35,6 +42,7 @@ Configurable via `keymaps` in [Configuration](#configuration). Defaults:
 | `<leader>ds` | Toggle solution view (auto-detects solution in cwd) | `keymaps.toggle` |
 | _(unset)_ | Enable interception of `.sln` / `.slnx` / `.slnf` files | `keymaps.enable` |
 | _(unset)_ | Disable interception — these files open as plain text | `keymaps.disable` |
+| `<leader>dp` | Open the NuGet packages view for the current solution or project | `keymaps.packages` |
 
 ### Inside the solution buffer
 
@@ -109,36 +117,54 @@ Delete the line with `dd`. For folders, `dd` removes the folder and all its chil
 | `:Dotnet toggle` | Toggle the solution view from anywhere |
 | `:Dotnet enable` | Enable interception of `.sln` / `.slnx` / `.slnf` files |
 | `:Dotnet disable` | Disable interception — these files open as plain text |
-| `:Dotnet packages [path]` | Open the NuGet packages view for a solution or project file |
+| `:Dotnet packages [path]` | Open the NuGet packages view for a solution or project file. Without a path it uses the current solution or project buffer, else the solution in the cwd. |
 
 `enable`/`disable` immediately convert any matching buffers already open in the current session (a plain buffer switches to the tree view, or vice versa), not just future opens. A buffer with unsaved changes is left alone with a warning — save or reload it first.
 
 ## NuGet Packages
 
-`:Dotnet packages` (default `<leader>dp`) opens a full-screen, Rider-style package manager built on [NvChad/volt](https://github.com/NvChad/volt) (NvUI). Rows are clickable with the mouse as well as the keyboard. It covers the open solution, the current `.csproj`/`.fsproj`/`.vbproj` buffer, or the solution in the cwd. Data comes from `dotnet list package --include-transitive`.
+`:Dotnet packages` (default `<leader>dp`) opens a full-screen, Rider-style package manager built on [NvChad/volt](https://github.com/NvChad/volt) (NvUI). It follows the terminal size when resized. Rows are clickable with the mouse as well as the keyboard.
 
-Tabs (switch with `[` and `]`):
+**Scope:** the solution in the current solution buffer, the current `.csproj` / `.fsproj` / `.vbproj` buffer, or the solution found in the cwd. Pass a path to `:Dotnet packages` to choose one explicitly.
 
-- **Installed**: every direct package, with the declared version and the latest if it is outdated. Transitive packages sit in a collapsed group.
-- **Upgrades**: only packages with a newer version available.
-- **Consolidate**: packages declared at different versions across projects. `u` sets them to the highest version in use.
-- **Browse**: search results from your package sources (`/`), with installed packages marked.
+**Data:** package and latest versions come from `dotnet list package --include-transitive` (with `--outdated`). Dependency lists are read from each project's `obj/project.assets.json`, so restore first. Projects with no restored assets are listed under `Skipped projects` and left out.
+
+### Tabs
+
+Switch with `[` and `]`, or click a tab.
+
+| Tab | Shows |
+|-----|-------|
+| **Installed** | Direct packages with the declared version and the latest if outdated. Expand a package to see its projects and a collapsed `Dependencies` list of every transitive package it brings in. |
+| **Transitive** | Packages only pulled in indirectly, with the resolved version and the direct packages that require them. |
+| **Upgrades** | Only packages with a newer version available. |
+| **Consolidate** | Packages declared at different versions across projects. `u` sets them to the highest version in use. |
+| **Browse** | Search results from your package sources (`/`), with installed packages marked. |
+
+### Keys
 
 | Key | Action |
 |-----|--------|
-| `<CR>` | Fold or unfold the package or group |
-| `<Tab>` | Toggle selection on a package (all projects) or a project row (that project only) |
+| `<CR>` | Fold or unfold the package or node under the cursor |
+| `<Tab>` | Toggle selection on a package (all its projects) or a project row (that project only) |
 | `u` | Apply the tab's update to the selection, or the row under the cursor |
 | `U` | Apply it to every package in the tab |
 | `v` | Pick a specific version from your package sources. On a Browse row, sets the version to add |
 | `/` | Search your package sources (switches to Browse) |
-| `a` | Add the selected Browse results to all projects or one project (`dotnet add package`) |
+| `a` | Add the selected Browse results to all projects or one project (`dotnet add package`). Outside Browse, starts a search. |
 | `d` | Remove the selected packages, or the row under the cursor, after confirming (`dotnet remove package`) |
-| `P` | Toggle prerelease versions (default from the `prerelease` option) |
+| `P` | Toggle prerelease versions |
+| `[` / `]` | Previous / next tab |
 | `r` | Refresh |
 | `q` | Close |
 
-Updates write straight to disk and edit only the version text, in the `PackageReference` (attribute, `<Version>` element or `VersionOverride`) or in `Directory.Packages.props` when central package management is used. Versions set through MSBuild properties are skipped and reported. Projects with no restored assets are listed under `Skipped`.
+### How updates are written
+
+Updates edit only the version text and write straight to disk, in the `PackageReference` (`Version` attribute, `<Version>` element or `VersionOverride`) or in `Directory.Packages.props` when Central Package Management is used. Versions set through MSBuild properties (for example `$(SerilogVersion)`) are skipped and reported. Add and remove go through `dotnet add package` and `dotnet remove package`, so they follow your NuGet.Config sources. Open buffers pick up the changes through `checktime`.
+
+### Prerelease
+
+Off by default. Set `prerelease = true` in [Configuration](#configuration) or press `P` in the view. When on, the outdated check, search and version picker include prerelease versions. When off, only stable versions are listed.
 
 ## Highlight Groups
 
@@ -151,6 +177,8 @@ Updates write straight to disk and edit only the version text, in the `PackageRe
 | `DotnetSolutionHeader` | VS purple | Solution name |
 | `DotnetSolutionMissing` | `DiagnosticError` fg + undercurl | File does not exist on disk |
 
+The packages view defines its own groups from volt's palette (falling back to your colourscheme): `DotnetPkgBand`, `DotnetPkgTitle`, `DotnetPkgMuted`, `DotnetPkgKey`, `DotnetPkgTabOn`, `DotnetPkgTabOff`, `DotnetPkgColHead`, `DotnetPkgGroup`, `DotnetPkgName`, `DotnetPkgLink`, `DotnetPkgDim`, `DotnetPkgOk`, `DotnetPkgWarn` and `DotnetPkgRule`.
+
 ## Configuration
 
 ```lua
@@ -162,9 +190,9 @@ require("dotnet").setup({
     prerelease = false,
     -- Global keybinds. Set an entry to false to disable it.
     keymaps = {
-        toggle = "<leader>ds",  -- Default: "<leader>ds"
-        enable = false,         -- Default: false (unset)
-        disable = false,        -- Default: false (unset)
+        toggle = "<leader>ds",   -- Default: "<leader>ds"
+        enable = false,          -- Default: false (unset)
+        disable = false,         -- Default: false (unset)
         packages = "<leader>dp", -- Default: "<leader>dp"
     },
 })
@@ -213,3 +241,5 @@ Separately, some fold plugins also override the `'foldtext'` window option (how 
 ## How It Works
 
 When a `.sln`, `.slnx`, or `.slnf` file is opened, a `BufReadCmd` autocmd intercepts the normal file read and populates the buffer with the parsed solution tree. The buffer type is `acwrite` so `:w` routes through `BufWriteCmd`, which reads the indentation of every line to reconstruct the full tree structure, then serialises it back to disk in the original format.
+
+The packages view is a separate scratch buffer rendered with volt's extmark layout. It reads package data from the `dotnet` CLI and each project's `obj/project.assets.json`, edits version text in place for updates, and delegates add and remove to `dotnet add package` / `dotnet remove package`.
