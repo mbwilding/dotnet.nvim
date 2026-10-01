@@ -109,8 +109,36 @@ Delete the line with `dd`. For folders, `dd` removes the folder and all its chil
 | `:Dotnet toggle` | Toggle the solution view from anywhere |
 | `:Dotnet enable` | Enable interception of `.sln` / `.slnx` / `.slnf` files |
 | `:Dotnet disable` | Disable interception — these files open as plain text |
+| `:Dotnet packages [path]` | Open the NuGet packages view for a solution or project file |
 
 `enable`/`disable` immediately convert any matching buffers already open in the current session (a plain buffer switches to the tree view, or vice versa), not just future opens. A buffer with unsaved changes is left alone with a warning — save or reload it first.
+
+## NuGet Packages
+
+`:Dotnet packages` (default `<leader>dp`) opens a full-screen, Rider-style package manager built on [NvChad/volt](https://github.com/NvChad/volt) (NvUI). Rows are clickable with the mouse as well as the keyboard. It covers the open solution, the current `.csproj`/`.fsproj`/`.vbproj` buffer, or the solution in the cwd. Data comes from `dotnet list package --include-transitive`.
+
+Tabs (switch with `[` and `]`):
+
+- **Installed**: every direct package, with the declared version and the latest if it is outdated. Transitive packages sit in a collapsed group.
+- **Upgrades**: only packages with a newer version available.
+- **Consolidate**: packages declared at different versions across projects. `u` sets them to the highest version in use.
+- **Browse**: search results from your package sources (`/`), with installed packages marked.
+
+| Key | Action |
+|-----|--------|
+| `<CR>` | Fold or unfold the package or group |
+| `<Tab>` | Toggle selection on a package (all projects) or a project row (that project only) |
+| `u` | Apply the tab's update to the selection, or the row under the cursor |
+| `U` | Apply it to every package in the tab |
+| `v` | Pick a specific version from your package sources. On a Browse row, sets the version to add |
+| `/` | Search your package sources (switches to Browse) |
+| `a` | Add the selected Browse results to all projects or one project (`dotnet add package`) |
+| `d` | Remove the selected packages, or the row under the cursor, after confirming (`dotnet remove package`) |
+| `P` | Toggle prerelease versions (default from the `prerelease` option) |
+| `r` | Refresh |
+| `q` | Close |
+
+Updates write straight to disk and edit only the version text, in the `PackageReference` (attribute, `<Version>` element or `VersionOverride`) or in `Directory.Packages.props` when central package management is used. Versions set through MSBuild properties are skipped and reported. Projects with no restored assets are listed under `Skipped`.
 
 ## Highlight Groups
 
@@ -129,11 +157,15 @@ Delete the line with `dd`. For folders, `dd` removes the folder and all its chil
 require("dotnet").setup({
     -- Whether .sln/.slnx/.slnf files are intercepted by the solution view. Default: true.
     enabled = true,
+    -- Include prerelease versions in the packages view (updates, search, version picker). Default: false.
+    -- Toggle at runtime with P in the packages view.
+    prerelease = false,
     -- Global keybinds. Set an entry to false to disable it.
     keymaps = {
         toggle = "<leader>ds",  -- Default: "<leader>ds"
         enable = false,         -- Default: false (unset)
         disable = false,        -- Default: false (unset)
+        packages = "<leader>dp", -- Default: "<leader>dp"
     },
 })
 ```
@@ -144,6 +176,8 @@ require("dotnet").setup({
 |------------|----------|---------|
 | A [Nerd Font](https://www.nerdfonts.com/) | Yes | Icon glyphs render as private-use codepoints |
 | [snacks.nvim](https://github.com/folke/snacks.nvim) | Yes | File picker used by `gf` |
+| [NvChad/volt](https://github.com/NvChad/volt) | For `:Dotnet packages` | UI library behind the NuGet packages view |
+| [.NET SDK](https://dotnet.microsoft.com/download) 8.0.400+ (`dotnet` on `PATH`) | For `:Dotnet packages` | Lists, searches, adds and removes packages. Uses your NuGet.Config sources. |
 | One of: [mini.icons](https://github.com/echasnovski/mini.icons), [nonicons](https://github.com/yamatsum/nonicons), [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) | Optional | File-type icons for non-project files and solution items. Falls back to a generic file icon if none are installed. |
 
 ### Fold plugins (nvim-ufo, etc.)
@@ -170,6 +204,7 @@ Separately, some fold plugins also override the `'foldtext'` window option (how 
     "mbwilding/dotnet.nvim",
     dependencies = {
         "folke/snacks.nvim",
+        "NvChad/volt", -- only needed for :Dotnet packages
         "nvim-tree/nvim-web-devicons", -- or echasnovski/mini.icons / yamatsum/nonicons
     },
 }

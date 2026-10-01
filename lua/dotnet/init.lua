@@ -62,6 +62,27 @@ function M.toggle(sln_path)
     M.open(sln_path)
 end
 
+---@param path? string solution or project file, defaults to the current buffer or cwd solution
+function M.packages(path)
+    if not path then
+        local buf = vim.api.nvim_get_current_buf()
+        local s = require("dotnet.state").get(buf)
+        local name = vim.api.nvim_buf_get_name(buf)
+        if s then
+            path = s.sln_path
+        elseif require("dotnet.packages").is_project(name) then
+            path = name
+        else
+            path = M.find_solution() or last_sln_path
+        end
+    end
+    if not path then
+        vim.notify("[dotnet] No solution or project found", vim.log.levels.WARN)
+        return
+    end
+    require("dotnet.packages").open(vim.fn.fnamemodify(path, ":p"))
+end
+
 ---@param bufnr integer
 ---@param sln_path string
 function M.load_buffer(bufnr, sln_path)
@@ -337,7 +358,7 @@ vim.api.nvim_create_autocmd("BufWriteCmd", {
     end,
 })
 
-local SUBCOMMANDS = { "toggle", "enable", "disable" }
+local SUBCOMMANDS = { "toggle", "enable", "disable", "packages" }
 
 vim.api.nvim_create_user_command("Dotnet", function(args)
     local sub = args.fargs[1]
@@ -347,6 +368,8 @@ vim.api.nvim_create_user_command("Dotnet", function(args)
         M.enable()
     elseif sub == "disable" then
         M.disable()
+    elseif sub == "packages" then
+        M.packages(args.fargs[2])
     else
         M.open(args.args ~= "" and args.args or nil)
     end
@@ -370,6 +393,12 @@ local KEYMAP_ACTIONS = {
     toggle = { fn = M.toggle, desc = "Dotnet: toggle solution view" },
     enable = { fn = M.enable, desc = "Dotnet: enable solution view" },
     disable = { fn = M.disable, desc = "Dotnet: disable solution view" },
+    packages = {
+        fn = function()
+            M.packages()
+        end,
+        desc = "Dotnet: NuGet packages",
+    },
 }
 for name, action in pairs(KEYMAP_ACTIONS) do
     local lhs = cfg.values.keymaps and cfg.values.keymaps[name]
