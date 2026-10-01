@@ -93,7 +93,10 @@ end
 ---@param no_restore boolean
 ---@param cb fun(json: table|nil, err: string|nil)
 local function list_json(scope, extra, no_restore, cb)
-    local cmd = { "dotnet", "list", scope, "package", "--include-transitive", "--format", "json" }
+    local cmd = { "dotnet", "list", scope, "package", "--format", "json" }
+    if not vim.tbl_contains(extra, "--outdated") then
+        table.insert(cmd, "--include-transitive")
+    end
     vim.list_extend(cmd, extra)
     if no_restore then
         table.insert(cmd, "--no-restore")
