@@ -401,9 +401,11 @@ end
 ---@field browse_versions table<string, string>
 ---@field prerelease boolean
 ---@field positioned boolean?
+---@field cursor_line integer
 ---@field vlines table[]
 ---@field win integer?
 ---@field width integer
+---@field height integer
 
 ---@type table<integer, dotnet.PackagesView>
 local views = {}
@@ -519,12 +521,27 @@ local function counts(v)
     return c
 end
 
+local nr = vim.fn.nr2char
 local ICON = {
-    open = vim.fn.nr2char(0xf0d7),
-    closed = vim.fn.nr2char(0xf0da),
-    on = vim.fn.nr2char(0xf046),
-    off = vim.fn.nr2char(0xf096),
+    open = nr(0xf0d7),
+    closed = nr(0xf0da),
+    on = nr(0xf046),
+    off = nr(0xf096),
+    pkg = nr(0xf487),
+    tab = {
+        installed = nr(0xf1b2),
+        transitive = nr(0xf0e8),
+        upgrades = nr(0xf0aa),
+        consolidate = nr(0xf0ec),
+        browse = nr(0xf002),
+    },
 }
+
+local TONES = { "Card", "Name", "Dim", "Ok", "Warn", "Link", "Err", "Rule" }
+local TONE_SET = {}
+for _, tone in ipairs(TONES) do
+    TONE_SET[tone] = true
+end
 
 local function setup_highlights()
     require("volt.highlights")
@@ -533,27 +550,105 @@ local function setup_highlights()
         return ok and h or {}
     end
     local normal = get("Normal")
-    local band = get("ExBlack2Bg").bg or get("CursorLine").bg
-    local band2 = get("ExBlack3Bg").bg or get("Visual").bg
-    local blue = get("ExBlue").fg or get("Function").fg
-    local green = get("ExGreen").fg or get("DiagnosticOk").fg
-    local yellow = get("ExYellow").fg or get("DiagnosticWarn").fg
-    local muted = get("CommentFg").fg or get("Comment").fg
+    local dark = vim.o.background ~= "light"
+    local fg = normal.fg or (dark and 0xdddddd or 0x222222)
+    local base = normal.bg or (dark and 0x1c1c1c or 0xf2f2f2)
+
+    local function rgb(n)
+        return math.floor(n / 65536) % 256, math.floor(n / 256) % 256, n % 256
+    end
+    local function lum(n)
+        local r, g, b = rgb(n)
+        local function f(x)
+            x = x / 255
+            return x <= 0.03928 and x / 12.92 or ((x + 0.055) / 1.055) ^ 2.4
+        end
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    end
+    local function contrast(x, y)
+        local lx, ly = lum(x), lum(y)
+        if lx < ly then
+            lx, ly = ly, lx
+        end
+        return (lx + 0.05) / (ly + 0.05)
+    end
+    local function blend(x, y, t)
+        local xr, xg, xb = rgb(x)
+        local yr, yg, yb = rgb(y)
+        local function mix(p, q)
+            return math.floor(p + (q - p) * t + 0.5)
+        end
+        return mix(xr, yr) * 65536 + mix(xg, yg) * 256 + mix(xb, yb)
+    end
+    local function readable(color, bgs)
+        for _ = 1, 16 do
+            local worst = math.huge
+            for _, bg in ipairs(bgs) do
+                worst = math.min(worst, contrast(color, bg))
+            end
+            if worst >= 4.5 then
+                break
+            end
+            color = blend(color, fg, 0.2)
+        end
+        return color
+    end
+    local function on(color)
+        return contrast(color, 0x000000) >= contrast(color, 0xffffff) and 0x000000 or 0xffffff
+    end
+
+    local base46 = vim.g.base46_cache ~= nil
+    local away = dark and 0x000000 or 0xffffff
+    local toward = dark and 0xffffff or 0x000000
+    local backdrop = base46 and get("ExDarkBg").bg or blend(base, away, 0.35)
+    local card = base
+    local bar = base46 and get("ExBlack2Bg").bg or blend(base, toward, 0.06)
+    local hi = base46 and get("ExBlack3Bg").bg or blend(base, toward, 0.13)
+    local function pick(volt_name, ...)
+        if base46 and get(volt_name).fg then
+            return get(volt_name).fg
+        end
+        for _, name in ipairs({ ... }) do
+            if get(name).fg then
+                return get(name).fg
+            end
+        end
+        return fg
+    end
+    local blue = pick("ExBlue", "Function", "Identifier")
+    local green = pick("ExGreen", "DiagnosticOk", "String", "Added")
+    local yellow = pick("ExYellow", "DiagnosticWarn", "WarningMsg", "Constant")
+    local red = pick("ExRed", "DiagnosticError", "ErrorMsg")
+    local muted = pick("CommentFg", "Comment", "NonText")
     local set = vim.api.nvim_set_hl
-    set(0, "DotnetPkgBand", { bg = band, fg = normal.fg })
-    set(0, "DotnetPkgTitle", { bg = band, fg = blue, bold = true })
-    set(0, "DotnetPkgMuted", { bg = band, fg = muted })
-    set(0, "DotnetPkgKey", { bg = band, fg = yellow, bold = true })
-    set(0, "DotnetPkgTabOn", { bg = blue, fg = normal.bg or 0, bold = true })
-    set(0, "DotnetPkgTabOff", { bg = band2, fg = muted })
-    set(0, "DotnetPkgColHead", { bg = band2, fg = muted, bold = true })
-    set(0, "DotnetPkgGroup", { bg = band2, fg = blue, bold = true })
-    set(0, "DotnetPkgName", { fg = normal.fg })
-    set(0, "DotnetPkgLink", { fg = blue })
-    set(0, "DotnetPkgDim", { fg = muted })
-    set(0, "DotnetPkgOk", { fg = green })
-    set(0, "DotnetPkgWarn", { fg = yellow })
-    set(0, "DotnetPkgRule", { fg = band2 or muted })
+
+    local surfaces = { card, hi }
+    local colors = {
+        Card = fg,
+        Name = fg,
+        Dim = readable(muted, surfaces),
+        Ok = readable(green, surfaces),
+        Warn = readable(yellow, surfaces),
+        Link = readable(blue, surfaces),
+        Err = readable(red, surfaces),
+        Rule = hi,
+    }
+    for name, color in pairs(colors) do
+        set(0, "DotnetPkg" .. name, { fg = color, bg = card })
+        set(0, "DotnetPkg" .. name .. "Cur", { fg = color, bg = hi })
+    end
+    set(0, "DotnetPkgBackdrop", { bg = backdrop, fg = backdrop })
+    set(0, "DotnetPkgBar", { bg = bar, fg = fg })
+    set(0, "DotnetPkgBarTitle", { bg = bar, fg = readable(blue, { bar }), bold = true })
+    set(0, "DotnetPkgBarDim", { bg = bar, fg = readable(muted, { bar }) })
+    set(0, "DotnetPkgBarWarn", { bg = yellow, fg = on(yellow), bold = true })
+    set(0, "DotnetPkgTabOn", { bg = blue, fg = on(blue), bold = true })
+    set(0, "DotnetPkgTabOff", { bg = bar, fg = readable(muted, { bar }) })
+    set(0, "DotnetPkgKbd", { bg = hi, fg = fg, bold = true })
+    set(0, "DotnetPkgKbdDesc", { bg = card, fg = readable(muted, { card }) })
+    set(0, "DotnetPkgHead", { bg = card, fg = readable(muted, { card }), bold = true })
+    set(0, "DotnetPkgMeter", { bg = card, fg = green })
+    set(0, "DotnetPkgMeterOff", { bg = card, fg = hi })
 end
 
 ---@param v dotnet.PackagesView
@@ -624,81 +719,215 @@ end
 
 ---@param v dotnet.PackagesView
 local function render(v)
+    if v.win and vim.api.nvim_win_is_valid(v.win) then
+        v.cursor_line = vim.api.nvim_win_get_cursor(v.win)[1]
+    end
     local c = counts(v)
     local vl, rows = {}, {}
     local W = v.width
+    local H = v.height
+    local margin = W >= 200 and math.floor((W - 190) / 2) or (W >= 100 and 1 or 0)
+    local cw = W - 2 * margin
+    local inner = cw - 4
 
-    local function line(cells)
-        table.insert(vl, cells)
-        return #vl
+    local function cur(h)
+        local tone = h:match("^DotnetPkg(%a+)$")
+        return tone and TONE_SET[tone] and h .. "Cur" or h
     end
-    local function band(cells, hl)
+
+    local function line(cells, base, selectable)
+        base = base or "DotnetPkgCard"
+        local active = selectable and (#vl + 1 == v.cursor_line)
         local used = 0
         for _, cell in ipairs(cells) do
             used = used + vim.fn.strwidth(cell[1])
         end
-        table.insert(cells, { string.rep(" ", math.max(W - used, 0)), hl })
-        return line(cells)
+        if active then
+            base = cur(base)
+            for _, cell in ipairs(cells) do
+                cell[2] = cur(cell[2])
+            end
+        end
+        local out = { { string.rep(" ", margin), "DotnetPkgBackdrop" }, { "  ", base } }
+        for _, cell in ipairs(cells) do
+            table.insert(out, cell)
+        end
+        table.insert(out, { string.rep(" ", math.max(cw - 2 - used, 0)), base })
+        table.insert(out, { string.rep(" ", math.max(W - margin - cw, 0)), "DotnetPkgBackdrop" })
+        table.insert(vl, out)
+        return #vl
+    end
+    local function gap()
+        table.insert(vl, { { string.rep(" ", W), "DotnetPkgBackdrop" } })
+    end
+    local function blank(base)
+        line({}, base)
     end
     local function rule()
-        line({ { string.rep("─", W), "DotnetPkgRule" } })
+        line({ { string.rep("╌", inner), "DotnetPkgRule" } })
     end
 
-    local title = {
-        { "  ", "DotnetPkgBand" },
-        { " NuGet ", "DotnetPkgTabOn" },
-        { "  " .. vim.fn.fnamemodify(v.scope, ":t"), "DotnetPkgTitle" },
+    local roomy = H >= 24
+    if roomy then
+        gap()
+        blank("DotnetPkgBar")
+    end
+    local head = {
+        { " " .. ICON.pkg .. "  NuGet Packages   ", "DotnetPkgBarTitle" },
+        { vim.fn.fnamemodify(v.scope, ":t"), "DotnetPkgBar" },
     }
     if v.prerelease then
-        table.insert(title, { "  prerelease", "DotnetPkgKey" })
+        table.insert(head, { "  ", "DotnetPkgBar" })
+        table.insert(head, { " prerelease ", "DotnetPkgBarWarn" })
     end
     if v.status ~= "" then
-        table.insert(title, { "  " .. v.status, "DotnetPkgMuted" })
+        table.insert(head, { "   " .. v.status, "DotnetPkgBarDim" })
     end
     if v.tab == "browse" then
-        table.insert(title, { "   search: ", "DotnetPkgMuted" })
-        table.insert(title, { v.query ~= "" and v.query or "press /", "DotnetPkgBand" })
+        table.insert(head, { "   " .. ICON.tab.browse .. "  ", "DotnetPkgBarDim" })
+        table.insert(head, { v.query ~= "" and v.query or "press / to search", "DotnetPkgBar" })
     end
-    band(title, "DotnetPkgBand")
-
-    local tabs = { { "  ", "DotnetPkgBand" } }
-    for _, t in ipairs(TABS) do
-        table.insert(tabs, {
-            string.format(" %s  %d ", TAB_TITLES[t], c[t]),
-            t == v.tab and "DotnetPkgTabOn" or "DotnetPkgTabOff",
-            function()
-                v.tab = t
-                v.selected = {}
-                render(v)
-            end,
-        })
-        table.insert(tabs, { " ", "DotnetPkgBand" })
+    line(head, "DotnetPkgBar")
+    if roomy then
+        blank("DotnetPkgBar")
     end
-    band(tabs, "DotnetPkgBand")
 
-    local hints = { { "  ", "DotnetPkgBand" } }
-    for _, h in ipairs(HINTS) do
-        table.insert(hints, { h[1], "DotnetPkgKey" })
-        table.insert(hints, { " " .. h[2] .. "   ", "DotnetPkgMuted" })
+    local function cells_width(cells)
+        local w = 0
+        for _, cell in ipairs(cells) do
+            w = w + vim.fn.strwidth(cell[1])
+        end
+        return w
     end
-    band(hints, "DotnetPkgBand")
 
-    local namew = 12
-    local verw = 14
+    local stats = {
+        { ICON.tab.installed .. " ", "DotnetPkgLink", string.format("%d direct", c.installed) },
+        { ICON.tab.transitive .. " ", "DotnetPkgDim", string.format("%d transitive", c.transitive) },
+        {
+            ICON.tab.upgrades .. " ",
+            c.upgrades > 0 and "DotnetPkgWarn" or "DotnetPkgOk",
+            string.format("%d outdated", c.upgrades),
+        },
+        { ICON.pkg .. " ", "DotnetPkgDim", string.format("%d projects", #v.projects) },
+    }
+    local stat_cells, stat_used = {}, 0
+    for _, item in ipairs(stats) do
+        local w = vim.fn.strwidth(item[1] .. item[3]) + 4
+        if stat_used + w <= inner then
+            table.insert(stat_cells, { item[1], item[2] })
+            table.insert(stat_cells, { item[3] .. "    ", "DotnetPkgName" })
+            stat_used = stat_used + w
+        end
+    end
+    local meter_w = math.min(28, inner - stat_used - 12)
+    if meter_w >= 10 then
+        local up_to_date = c.installed > 0 and math.floor(meter_w * (c.installed - c.upgrades) / c.installed + 0.5)
+            or 0
+        table.insert(stat_cells, { string.rep("┃", up_to_date), "DotnetPkgMeter" })
+        table.insert(stat_cells, { string.rep("┃", meter_w - up_to_date), "DotnetPkgMeterOff" })
+        table.insert(stat_cells, { "  up to date", "DotnetPkgDim" })
+    end
+    if #stat_cells > 0 then
+        blank()
+        line(stat_cells)
+    end
+
+    local function make_tabs(compact)
+        local tabs = {}
+        for _, t in ipairs(TABS) do
+            local active = t == v.tab
+            local label = (compact and not active) and string.format(" %s %d ", ICON.tab[t], c[t])
+                or string.format(" %s  %s  %d ", ICON.tab[t], TAB_TITLES[t], c[t])
+            table.insert(tabs, {
+                label,
+                active and "DotnetPkgTabOn" or "DotnetPkgTabOff",
+                function()
+                    v.tab = t
+                    v.selected = {}
+                    render(v)
+                end,
+            })
+            table.insert(tabs, { compact and " " or "  ", "DotnetPkgCard" })
+        end
+        return tabs
+    end
+    local tabs = make_tabs(false)
+    if cells_width(tabs) > inner then
+        tabs = make_tabs(true)
+    end
+    blank()
+    line(tabs)
+
+    if H >= 20 then
+        local hint_lines, current, used = {}, {}, 0
+        for _, h in ipairs(HINTS) do
+            local w = vim.fn.strwidth(h[1]) + vim.fn.strwidth(h[2]) + 6
+            if used + w > inner and #current > 0 then
+                table.insert(hint_lines, current)
+                current, used = {}, 0
+            end
+            table.insert(current, { " " .. h[1] .. " ", "DotnetPkgKbd" })
+            table.insert(current, { " " .. h[2] .. "   ", "DotnetPkgKbdDesc" })
+            used = used + w
+        end
+        table.insert(hint_lines, current)
+        blank()
+        for i, cells in ipairs(hint_lines) do
+            if i <= 2 then
+                line(cells)
+            end
+        end
+    end
+    blank()
+
+    local avail = inner - 4
+    local namew, verw = 12, 12
     for _, pkg in ipairs(v.pkgs) do
         namew = math.max(namew, math.min(#pkg.id, MAX_NAME))
-        verw = math.max(verw, math.min(#current_text(pkg), 24), math.min(#pkg.latest, 24))
+        verw = math.max(verw, math.min(#current_text(pkg), 22), math.min(#pkg.latest, 22))
     end
     namew = namew + 2
     verw = verw + 2
+    local usedw = 12
+    local thirdw = verw
+    local show_used = true
+    local function total()
+        return namew + verw + thirdw + (show_used and usedw or 0)
+    end
+    if v.tab == "transitive" then
+        thirdw = math.max(avail - namew - verw - usedw, 18)
+    end
+    if total() > avail then
+        show_used = false
+    end
+    if v.tab == "transitive" and not show_used then
+        thirdw = math.max(avail - namew - verw, 18)
+    end
+    while total() > avail and verw > 16 do
+        verw = verw - 2
+        if v.tab ~= "transitive" then
+            thirdw = verw
+        end
+    end
+    if total() > avail then
+        namew = math.max(avail - verw - thirdw, 16)
+    end
+    if total() > avail then
+        verw = math.max(math.floor((avail - namew) / 2), 8)
+        thirdw = v.tab == "transitive" and math.max(avail - namew - verw, 8) or verw
+    end
 
     local cols = COLUMNS[v.tab]
-    band({
-        { "    " .. fit(cols[1], namew), "DotnetPkgColHead" },
-        { fit(cols[2], verw), "DotnetPkgColHead" },
-        { fit(cols[3], v.tab == "transitive" and verw + 22 or verw), "DotnetPkgColHead" },
-        { cols[4], "DotnetPkgColHead" },
-    }, "DotnetPkgColHead")
+    local head_cells = {
+        { "    " .. fit(cols[1], namew), "DotnetPkgHead" },
+        { fit(cols[2], verw), "DotnetPkgHead" },
+        { fit(cols[3], thirdw), "DotnetPkgHead" },
+    }
+    if show_used then
+        table.insert(head_cells, { cols[4], "DotnetPkgHead" })
+    end
+    line(head_cells)
+    rule()
 
     local function target(pkg)
         if v.tab == "consolidate" then
@@ -737,9 +966,9 @@ local function render(v)
             table.sort(names, function(a, b)
                 return a:lower() < b:lower()
             end)
-            return { fit(table.concat(names, ", "), verw + 20) .. "  ", "DotnetPkgLink" }
+            return { fit(table.concat(names, ", "), thirdw - 2) .. "  ", "DotnetPkgLink" }
         end
-        return { fit(actionable and ("→ " .. target(pkg)) or "", verw), "DotnetPkgOk" }
+        return { fit(actionable and ("→ " .. target(pkg)) or "", thirdw), "DotnetPkgOk" }
     end
 
     local function add_pkg(pkg, indent)
@@ -750,7 +979,7 @@ local function render(v)
             actionable = actionable or needs_update(pkg, u)
         end
         local open = is_open(v, prow.key, v.tab ~= "installed" and actionable)
-        local cur = current_text(pkg)
+        local cur_text = current_text(pkg)
         prow.line = line({
             {
                 indent .. (open and ICON.open or ICON.closed) .. " ",
@@ -762,10 +991,11 @@ local function render(v)
             },
             select_cell(prow),
             { fit(pkg.id, namew), pkg.transitive and "DotnetPkgDim" or "DotnetPkgName" },
-            { fit(cur, verw), cur == "mixed" and "DotnetPkgWarn" or "DotnetPkgDim" },
+            { fit(cur_text, verw), cur_text == "mixed" and "DotnetPkgWarn" or "DotnetPkgDim" },
             third_cell(pkg, actionable),
-            { string.format("%d project%s", #pkg.usages, #pkg.usages == 1 and "" or "s"), "DotnetPkgDim" },
-        })
+            show_used and { string.format("%d project%s", #pkg.usages, #pkg.usages == 1 and "" or "s"), "DotnetPkgDim" }
+                or nil,
+        }, nil, true)
         if not open then
             return
         end
@@ -773,13 +1003,13 @@ local function render(v)
             local urow = { kind = "proj", pkg = pkg, usage = u }
             table.insert(rows, urow)
             urow.line = line({
-                { indent .. "  " .. (i == #pkg.usages and "└" or "├") .. " ", "DotnetPkgRule" },
+                { indent .. "  " .. (i == #pkg.usages and "└" or "├") .. " ", "DotnetPkgDim" },
                 select_cell(urow),
                 { fit(vim.fn.fnamemodify(u.project, ":t:r"), namew - 2), "DotnetPkgLink" },
                 { fit(u.requested, verw), "DotnetPkgDim" },
-                { fit(needs_update(pkg, u) and ("→ " .. target(pkg)) or "", verw), "DotnetPkgOk" },
-                { u.transitive and "transitive" or "", "DotnetPkgDim" },
-            })
+                { fit(needs_update(pkg, u) and ("→ " .. target(pkg)) or "", thirdw), "DotnetPkgOk" },
+                show_used and { u.transitive and "transitive" or "", "DotnetPkgDim" } or nil,
+            }, nil, true)
         end
         local dep_ids = vim.tbl_keys(pkg.deps or {})
         if #dep_ids > 0 then
@@ -798,11 +1028,11 @@ local function render(v)
                         render(v)
                     end,
                 },
-            })
+            }, nil, true)
             if dopen then
                 for i, id in ipairs(dep_ids) do
                     line({
-                        { indent .. "    " .. (i == #dep_ids and "└" or "├") .. " ", "DotnetPkgRule" },
+                        { indent .. "    " .. (i == #dep_ids and "└" or "├") .. " ", "DotnetPkgDim" },
                         { "  ", "DotnetPkgDim" },
                         { fit(id, namew - 2), "DotnetPkgDim" },
                         { fit(pkg.deps[id], verw), "DotnetPkgDim" },
@@ -826,9 +1056,9 @@ local function render(v)
                 select_cell(row),
                 { fit(res.id, namew), have and "DotnetPkgDim" or "DotnetPkgName" },
                 { fit(v.browse_versions[res.id] or res.version, verw), "DotnetPkgOk" },
-                { fit(res.downloads, verw), "DotnetPkgDim" },
-                { have and ("installed " .. have) or "", "DotnetPkgWarn" },
-            })
+                { fit(res.downloads, thirdw), "DotnetPkgDim" },
+                show_used and { have and ("installed " .. have) or "", "DotnetPkgWarn" } or nil,
+            }, nil, true)
         end
         if v.loading then
             line({ { "  searching...", "DotnetPkgDim" } })
@@ -857,12 +1087,15 @@ local function render(v)
     end
 
     if #v.problems > 0 then
+        blank()
         rule()
-        line({ { "  Skipped projects", "DotnetPkgWarn" } })
+        line({ { ICON.pkg .. "  Skipped projects", "DotnetPkgWarn" } })
         for _, p in ipairs(v.problems) do
             line({ { "    " .. p, "DotnetPkgDim" } })
         end
     end
+    blank()
+    gap()
 
     v.rows = rows
     v.vlines = vl
@@ -1083,6 +1316,7 @@ function M.open(scope)
         vlines = {},
         prerelease = require("dotnet.config").values.prerelease == true,
         width = 80,
+        height = 24,
     }
     views[buf] = v
 
@@ -1358,6 +1592,7 @@ function M.open(scope)
         }
     end
     v.width = vim.o.columns
+    v.height = fullscreen().height
     v.win = vim.api.nvim_open_win(
         buf,
         true,
@@ -1371,11 +1606,21 @@ function M.open(scope)
             end
             vim.api.nvim_win_set_config(v.win, fullscreen())
             v.width = vim.o.columns
+            v.height = fullscreen().height
             render(v)
         end,
     })
-    vim.wo[v.win].cursorline = true
+    vim.wo[v.win].cursorline = false
     vim.wo[v.win].wrap = false
+    vim.wo[v.win].winhighlight = "NormalFloat:DotnetPkgBackdrop,EndOfBuffer:DotnetPkgBackdrop"
+    vim.api.nvim_create_autocmd("CursorMoved", {
+        buffer = buf,
+        callback = function()
+            if vim.api.nvim_win_is_valid(v.win) and vim.api.nvim_win_get_cursor(v.win)[1] ~= v.cursor_line then
+                render(v)
+            end
+        end,
+    })
     refresh(v)
 end
 

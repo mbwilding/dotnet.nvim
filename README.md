@@ -123,7 +123,7 @@ Delete the line with `dd`. For folders, `dd` removes the folder and all its chil
 
 ## NuGet Packages
 
-`:Dotnet packages` (default `<leader>dp`) opens a full-screen, Rider-style package manager built on [NvChad/volt](https://github.com/NvChad/volt) (NvUI). It follows the terminal size when resized. Rows are clickable with the mouse as well as the keyboard.
+`:Dotnet packages` (default `<leader>dp`) opens a full-screen, Rider-style package manager built on [NvChad/volt](https://github.com/NvChad/volt) (NvUI). The layout is a centred card on a darker backdrop with a title bar, stat summary with an up-to-date meter, icon tabs, key hint pills, a column table and a highlighted cursor row. The layout is responsive: it uses the full width on narrow terminals and a centred card on very wide ones. On narrow or short windows it drops the stats meter, compacts the tabs, wraps or hides the key hints, hides the `Used by` column and shrinks the name and version columns, and it re-flows on resize. Text colours are adjusted to keep a readable contrast against the panel backgrounds. Rows are clickable with the mouse as well as the keyboard.
 
 **Scope:** the solution in the current solution buffer, the current `.csproj` / `.fsproj` / `.vbproj` buffer, or the solution found in the cwd. Pass a path to `:Dotnet packages` to choose one explicitly.
 
@@ -177,7 +177,7 @@ Off by default. Set `prerelease = true` in [Configuration](#configuration) or pr
 | `DotnetSolutionHeader` | VS purple | Solution name |
 | `DotnetSolutionMissing` | `DiagnosticError` fg + undercurl | File does not exist on disk |
 
-The packages view defines its own groups from volt's palette (falling back to your colourscheme): `DotnetPkgBand`, `DotnetPkgTitle`, `DotnetPkgMuted`, `DotnetPkgKey`, `DotnetPkgTabOn`, `DotnetPkgTabOff`, `DotnetPkgColHead`, `DotnetPkgGroup`, `DotnetPkgName`, `DotnetPkgLink`, `DotnetPkgDim`, `DotnetPkgOk`, `DotnetPkgWarn` and `DotnetPkgRule`.
+The packages view defines its own groups, using volt's palette when base46 is loaded and your colourscheme otherwise. Tones (each with a `Cur` variant for the cursor row): `DotnetPkgCard`, `DotnetPkgName`, `DotnetPkgDim`, `DotnetPkgOk`, `DotnetPkgWarn`, `DotnetPkgLink`, `DotnetPkgErr`, `DotnetPkgRule`. Chrome: `DotnetPkgBackdrop`, `DotnetPkgBar`, `DotnetPkgBarTitle`, `DotnetPkgBarDim`, `DotnetPkgBarWarn`, `DotnetPkgTabOn`, `DotnetPkgTabOff`, `DotnetPkgKbd`, `DotnetPkgKbdDesc`, `DotnetPkgHead`, `DotnetPkgMeter`, `DotnetPkgMeterOff`.
 
 ## Configuration
 
