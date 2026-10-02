@@ -188,6 +188,8 @@ require("dotnet").setup({
     -- Include prerelease versions in the packages view (updates, search, version picker). Default: false.
     -- Toggle at runtime with P in the packages view.
     prerelease = false,
+    -- Projects checked for updates in parallel in the packages view. 1 checks the whole solution in one call. Default: 10.
+    outdated_concurrency = 10,
     -- Global keybinds. Set an entry to false to disable it.
     keymaps = {
         toggle = "<leader>ds",   -- Default: "<leader>ds"

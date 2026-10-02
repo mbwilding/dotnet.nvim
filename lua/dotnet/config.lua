@@ -9,12 +9,14 @@ local M = {}
 ---@class dotnet.Config
 ---@field enabled? boolean Whether the solution view intercepts .sln/.slnx/.slnf files (default: true)
 ---@field prerelease? boolean Include prerelease versions in the packages view: updates, search and version picker (default: false)
+---@field outdated_concurrency? integer Projects checked for updates in parallel in the packages view. 1 checks the whole solution in one call (default: 10)
 ---@field keymaps? dotnet.KeymapsConfig Global keybinds. Set an entry to false to disable it.
 
 ---@type dotnet.Config
 M.values = {
     enabled = true,
     prerelease = false,
+    outdated_concurrency = 10,
     keymaps = {
         toggle = "<leader>ds",
         enable = false,

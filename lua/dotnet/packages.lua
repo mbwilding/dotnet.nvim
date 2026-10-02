@@ -211,28 +211,102 @@ local function project_paths(all)
     return out
 end
 
+---@param paths string[]
+---@param extra string[]
+---@param limit integer
+---@param cb fun(json: table|nil)
+local function outdated_per_project(paths, extra, limit, cb)
+    local merged, next_i, running, done = { projects = {} }, 0, 0, 0
+    local total = #paths
+    local function pump()
+        while running < limit and next_i < total do
+            next_i = next_i + 1
+            running = running + 1
+            list_json(paths[next_i], extra, true, function(json)
+                running = running - 1
+                done = done + 1
+                if json then
+                    vim.list_extend(merged.projects, json.projects or {})
+                end
+                if done == total then
+                    cb(merged)
+                else
+                    pump()
+                end
+            end)
+        end
+    end
+    if total == 0 then
+        cb(nil)
+        return
+    end
+    pump()
+end
+
 ---@param scope string
 ---@param prerelease boolean
----@param cb fun(pkgs: dotnet.Package[]|nil, problems: string[], projects: string[]|nil)
+---@param cb fun(pkgs: dotnet.Package[]|nil, problems: string[], projects: string[]|nil, final: boolean)
 function M.discover(scope, prerelease, cb)
+    local extra = prerelease and { "--outdated", "--include-prerelease" } or { "--outdated" }
+    local all, outdated, outdated_done
+
+    local function finish(o)
+        local pkgs = M.parse(all, o)
+        attach_graph(pkgs, all)
+        cb(pkgs, problems_of(all), project_paths(all), true)
+    end
+
+    local function try_final()
+        if not all or not outdated_done then
+            return
+        end
+        if outdated and outdated.projects and #outdated.projects > 0 then
+            return finish(outdated)
+        end
+        run_outdated(finish)
+    end
+
+    local limit = require("dotnet.config").values.outdated_concurrency
+    local function run_outdated(on_done)
+        if limit > 1 and all then
+            outdated_per_project(project_paths(all), extra, limit, on_done)
+        else
+            list_json(scope, extra, true, on_done)
+        end
+    end
+
+    if limit <= 1 then
+        run_outdated(function(o)
+            outdated, outdated_done = o, true
+            try_final()
+        end)
+    end
+
     local function fetch(no_restore)
-        list_json(scope, {}, no_restore, function(all, err)
-            if not all then
-                cb(nil, { err })
+        list_json(scope, {}, no_restore, function(a, err)
+            if not a then
+                cb(nil, { err }, nil, true)
                 return
             end
-            if not all.projects or #all.projects == 0 then
+            if not a.projects or #a.projects == 0 then
                 if not no_restore then
                     return fetch(true)
                 end
-                cb(nil, problems_of(all))
+                cb(nil, problems_of(a), nil, true)
                 return
             end
-            list_json(scope, prerelease and { "--outdated", "--include-prerelease" } or { "--outdated" }, true, function(outdated)
-                local pkgs = M.parse(all, outdated)
-                attach_graph(pkgs, all)
-                cb(pkgs, problems_of(all), project_paths(all))
-            end)
+            all = a
+            local pkgs = M.parse(all, nil)
+            attach_graph(pkgs, all)
+            cb(pkgs, problems_of(all), project_paths(all), false)
+            if limit > 1 then
+                run_outdated(function(o)
+                    outdated, outdated_done = o, true
+                    try_final()
+                end)
+            else
+                try_final()
+            end
         end)
     end
     fetch(false)
@@ -1109,15 +1183,17 @@ end
 local function refresh(v)
     v.status = "loading..."
     render(v)
-    M.discover(v.scope, v.prerelease, function(pkgs, problems, projects)
+    M.discover(v.scope, v.prerelease, function(pkgs, problems, projects, final)
         if not vim.api.nvim_buf_is_valid(v.buf) then
             return
         end
         v.pkgs = pkgs or {}
         v.projects = projects or {}
         v.problems = problems
-        v.selected = {}
-        v.status = pkgs and "" or "error"
+        if not final or not pkgs then
+            v.selected = {}
+        end
+        v.status = not pkgs and "error" or final and "" or "checking for updates..."
         render(v)
         if not v.positioned and v.rows[1] and vim.api.nvim_win_is_valid(v.win) then
             v.positioned = true
