@@ -530,7 +530,30 @@ local function compare_versions(a, b)
     if bp == "" then
         return -1
     end
-    return ap < bp and -1 or 1
+    local ai, bi = vim.split(ap, ".", { plain = true }), vim.split(bp, ".", { plain = true })
+    for i = 1, math.max(#ai, #bi) do
+        local x, y = ai[i], bi[i]
+        if not x then
+            return -1
+        end
+        if not y then
+            return 1
+        end
+        if x ~= y then
+            local xn, yn = tonumber(x), tonumber(y)
+            if xn and yn then
+                return xn < yn and -1 or 1
+            end
+            if xn then
+                return -1
+            end
+            if yn then
+                return 1
+            end
+            return x < y and -1 or 1
+        end
+    end
+    return 0
 end
 
 ---@param pkg dotnet.Package
@@ -1288,10 +1311,6 @@ local function fetch_versions(id, prerelease, cb)
             end
         end
         table.sort(versions, function(a, b)
-            local a_pre, b_pre = a:find("-", 1, true) ~= nil, b:find("-", 1, true) ~= nil
-            if a_pre ~= b_pre then
-                return not a_pre
-            end
             return compare_versions(a, b) > 0
         end)
         cb(#versions > 0 and versions or nil)
@@ -1487,8 +1506,7 @@ function M.open(scope)
                 vim.notify("[dotnet] Could not fetch versions for " .. id .. " from the package sources", vim.log.levels.WARN)
                 return
             end
-            local shown = vim.list_slice(versions, 1, 60)
-            vim.ui.select(shown, { prompt = id .. " version" }, function(choice)
+            vim.ui.select(versions, { prompt = id .. " version" }, function(choice)
                 if choice and row.kind == "result" then
                     v.browse_versions[id] = choice
                     render(v)
